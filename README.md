@@ -25,6 +25,12 @@ One per rule in `docs/`, each covering the mechanism, the permission flags, the 
 surface, the parameters and their ceilings, the invariants with the test that proves each,
 the failure cases stated plainly, and where the rule fits in a modular stack.
 
+`docs/SWEEP-RAILS.md` is not one of the six rules. It is a standalone writeup of three guards
+that keep a permissionless conversion safe when the hook has to trade through a pool it does
+not control and has no trustworthy price for: a per-route rate limit, a self-maintained
+reference band compared in sqrt space, and a slippage floor against the pre-swap spot quote.
+They are extracted from the deployed `MidasRWAHook` and are reusable independently of it.
+
 `docs/FEE-STREAM-COLLATERAL.md` is the design spec for the credit idea, with
 `src/interfaces/IFeeStream.sol` and `src/interfaces/IFeeStreamCredit.sol` encoding it. There is
 no implementation on purpose: credit against an undeployed credit market is a memo, not a
