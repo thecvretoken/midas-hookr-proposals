@@ -3,6 +3,8 @@ pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {SweepGuard} from "../src/libraries/SweepGuard.sol";
+import {SqrtPriceMath} from "@uniswap/v4-core/src/libraries/SqrtPriceMath.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 /// @notice External wrapper so reverts from the internal library surface at call depth.
 contract GuardHarness {
@@ -11,7 +13,27 @@ contract GuardHarness {
     SweepGuard.Route public r;
 
     function seed(uint160 s) external {
-        r.seal(s);
+        r.seal(s, 0);
+    }
+
+    function capIn(SweepGuard.Route memory cur, SweepGuard.Params memory p, uint128 l, uint160 spot, bool z)
+        external
+        pure
+        returns (uint256)
+    {
+        return SweepGuard.capIn(cur, p, l, spot, z);
+    }
+
+    function reseedNext(SweepGuard.Route memory cur, SweepGuard.ReseedWalls memory w, uint160 t, uint256 nowTs)
+        external
+        pure
+        returns (SweepGuard.Route memory)
+    {
+        return SweepGuard.reseedNext(cur, w, t, nowTs);
+    }
+
+    function validateWalls(SweepGuard.ReseedWalls memory w) external pure {
+        SweepGuard.validate(w);
     }
 
     function next(SweepGuard.Route memory cur, SweepGuard.Params memory p, uint160 spot, uint256 nowTs)
@@ -51,12 +73,18 @@ contract SweepGuardTest is Test {
 
     function _p(bool anchor, uint16 drift) internal pure returns (SweepGuard.Params memory) {
         return SweepGuard.Params({
-            interval: 3600, bandBps: 1000, floorBps: 300, smoothing: 4, anchorFloor: anchor, maxDriftBps: drift
+            interval: 3600,
+            bandBps: 1000,
+            floorBps: 300,
+            smoothing: 4,
+            anchorFloor: anchor,
+            maxDriftBps: drift,
+            maxImpactBps: 0
         });
     }
 
     function _r(uint160 ref, uint64 lastAt) internal pure returns (SweepGuard.Route memory) {
-        return SweepGuard.Route({seed: Q, ref: ref, lastAt: lastAt});
+        return SweepGuard.Route({seed: Q, lastAt: lastAt, ref: ref, reseededAt: 0, maxIn: 0});
     }
 
     function _sqrtAt(uint256 bpsOfQ) internal pure returns (uint160) {
@@ -67,7 +95,7 @@ contract SweepGuardTest is Test {
     ///      so it is refused outright instead of taking the caller's spot on first use.
     function test_unseededRouteRefused() public {
         vm.expectRevert(SweepGuard.RouteNotSeeded.selector);
-        h.next(SweepGuard.Route({seed: 0, ref: 0, lastAt: 0}), _p(false, 0), Q, 1);
+        h.next(SweepGuard.Route({seed: 0, lastAt: 0, ref: 0, reseededAt: 0, maxIn: 0}), _p(false, 0), Q, 1);
     }
 
     function test_seed_isOneShotAndNonZero() public {
@@ -76,7 +104,7 @@ contract SweepGuardTest is Test {
         h.seed(Q);
         vm.expectRevert(SweepGuard.AlreadySeeded.selector);
         h.seed(Q);
-        (uint160 s, uint160 ref, uint64 lastAt) = h.r();
+        (uint160 s, uint64 lastAt, uint160 ref,,) = h.r();
         assertEq(s, Q, "seed");
         assertEq(ref, Q, "reference starts at the seed");
         assertEq(lastAt, 0, "never converted");
@@ -157,6 +185,10 @@ contract SweepGuardTest is Test {
         p.maxDriftBps = 10_000;
         vm.expectRevert(SweepGuard.BadParams.selector);
         h.validate(p);
+        p = _p(false, 0);
+        p.maxImpactBps = 10_000;
+        vm.expectRevert(SweepGuard.BadParams.selector);
+        h.validate(p);
     }
 
     function testFuzz_referenceStaysBetweenRefAndSpot(uint256 spotBps) public view {
@@ -165,5 +197,113 @@ contract SweepGuardTest is Test {
         (uint160 a, uint160 b) = spot < Q ? (spot, Q) : (Q, spot);
         assertGe(n.ref, a);
         assertLe(n.ref, b);
+    }
+
+    // ---------------------------------------------------------------------
+    // Size cap
+    // ---------------------------------------------------------------------
+
+    /// @dev Converting exactly the cap moves sqrt price by maxImpactBps at constant liquidity,
+    ///      in both directions.
+    function test_capIn_impactMatchesTarget() public view {
+        SweepGuard.Params memory p = _p(false, 0);
+        p.maxImpactBps = 15;
+        uint128 L = 1e21;
+        uint256 down = h.capIn(_r(Q, 0), p, L, Q, true);
+        uint160 afterDown = SqrtPriceMath.getNextSqrtPriceFromInput(Q, L, down, true);
+        assertApproxEqRel(afterDown, (uint256(Q) * 9985) / 10_000, 1e12, "token0 in: -0.15% sqrt");
+        uint256 up = h.capIn(_r(Q, 0), p, L, Q, false);
+        uint160 afterUp = SqrtPriceMath.getNextSqrtPriceFromInput(Q, L, up, false);
+        assertApproxEqRel(afterUp, (uint256(Q) * 10_015) / 10_000, 1e12, "token1 in: +0.15% sqrt");
+        assertApproxEqRel(down, 1.5e18, 2e15, "about 0.15% of depth");
+    }
+
+    function test_capIn_ceilingAndOff() public view {
+        SweepGuard.Params memory p = _p(false, 0);
+        SweepGuard.Route memory r = _r(Q, 0);
+        assertEq(h.capIn(r, p, 1e21, Q, true), type(uint256).max, "no bounds set");
+        r.maxIn = 1e17;
+        assertEq(h.capIn(r, p, 1e21, Q, true), 1e17, "ceiling alone");
+        p.maxImpactBps = 15;
+        assertEq(h.capIn(r, p, 1e21, Q, true), 1e17, "ceiling below the impact cap wins");
+        assertLt(h.capIn(r, p, 1e19, Q, true), 1e17, "thin pool: impact cap wins");
+    }
+
+    // ---------------------------------------------------------------------
+    // Recovery
+    // ---------------------------------------------------------------------
+
+    function _w() internal pure returns (SweepGuard.ReseedWalls memory) {
+        return SweepGuard.ReseedWalls({maxStepBps: 500, minInterval: 3600, minStall: 6 hours});
+    }
+
+    function test_reseed_stepIsClampedAndReanchors() public view {
+        SweepGuard.Route memory n = h.reseedNext(_r(Q, 0), _w(), _sqrtAt(8000), 1);
+        assertEq(n.ref, _sqrtAt(9500), "clamped to a 5% step down");
+        assertEq(n.seed, n.ref, "seed re-anchored with it");
+        assertEq(n.reseededAt, 1);
+        SweepGuard.Route memory u = h.reseedNext(_r(Q, 0), _w(), _sqrtAt(10_200), 1);
+        assertEq(u.ref, _sqrtAt(10_200), "inside the step: moves all the way");
+    }
+
+    function test_reseed_wallsHold() public {
+        SweepGuard.Route memory r = _r(Q, 10_000); // converted at t = 10_000
+        vm.expectRevert(SweepGuard.RouteNotStalled.selector);
+        h.reseedNext(r, _w(), _sqrtAt(9000), 10_000 + 6 hours - 1);
+        SweepGuard.Route memory n = h.reseedNext(r, _w(), _sqrtAt(9000), 10_000 + 6 hours);
+        vm.expectRevert(SweepGuard.ReseedTooSoon.selector);
+        h.reseedNext(n, _w(), _sqrtAt(9000), 10_000 + 6 hours + 3599);
+        h.reseedNext(n, _w(), _sqrtAt(9000), 10_000 + 6 hours + 3600);
+        vm.expectRevert(SweepGuard.RouteNotSeeded.selector);
+        h.reseedNext(SweepGuard.Route({seed: 0, lastAt: 0, ref: 0, reseededAt: 0, maxIn: 0}), _w(), Q, 1);
+        vm.expectRevert(SweepGuard.ZeroSeed.selector);
+        h.reseedNext(r, _w(), 0, 10_000 + 6 hours);
+        SweepGuard.ReseedWalls memory bad = _w();
+        bad.maxStepBps = 0;
+        vm.expectRevert(SweepGuard.BadWalls.selector);
+        h.validateWalls(bad);
+    }
+
+    // ---------------------------------------------------------------------
+    // Properties
+    // ---------------------------------------------------------------------
+
+    /// @dev For any liquidity, price, direction and cap, converting exactly capIn never moves
+    ///      sqrt price past maxImpactBps at constant liquidity.
+    function testFuzz_capIn_neverExceedsItsImpact(uint128 L, uint160 spot, uint16 bps, bool zeroForOne) public view {
+        L = uint128(bound(L, 1e6, 1e30));
+        spot = uint160(bound(spot, uint256(TickMath.MIN_SQRT_PRICE) * 1e3, uint256(TickMath.MAX_SQRT_PRICE) / 1e3));
+        bps = uint16(bound(bps, 1, 2000));
+        SweepGuard.Params memory p = _p(false, 0);
+        p.maxImpactBps = bps;
+        uint256 cap = h.capIn(_r(Q, 0), p, L, spot, zeroForOne);
+        if (cap == 0) return;
+        uint160 after_ = SqrtPriceMath.getNextSqrtPriceFromInput(spot, L, cap, zeroForOne);
+        if (zeroForOne) assertGe(after_, (uint256(spot) * (10_000 - bps)) / 10_000);
+        else assertLe(after_, (uint256(spot) * (10_000 + bps)) / 10_000);
+    }
+
+    /// @dev Thirty-two reseed attempts at random times toward random targets. Every one that
+    ///      succeeds respects all three walls, and every one that fails had a wall in force.
+    function testFuzz_reseed_wallsHoldOverAnySequence(uint256 salt) public view {
+        SweepGuard.ReseedWalls memory w = _w();
+        SweepGuard.Route memory r = _r(Q, 1);
+        uint256 t = 1;
+        for (uint256 i; i < 32; i++) {
+            t += uint256(keccak256(abi.encode(salt, i, "dt"))) % 4 hours;
+            uint160 target = uint160(bound(uint256(keccak256(abi.encode(salt, i, "tg"))), Q / 4, uint256(Q) * 4));
+            bool wall = t < uint256(r.lastAt) + w.minStall || (r.reseededAt != 0 && t < uint256(r.reseededAt) + w.minInterval);
+            try h.reseedNext(r, w, target, t) returns (SweepGuard.Route memory n) {
+                assertFalse(wall, "succeeded through a wall");
+                assertLe(n.ref, (uint256(r.ref) * 10_500) / 10_000, "step up past 5%");
+                assertGe(n.ref, (uint256(r.ref) * 9500) / 10_000, "step down past 5%");
+                assertEq(n.seed, n.ref, "seed re-anchored");
+                assertEq(n.lastAt, r.lastAt, "reseed never counts as a conversion");
+                assertEq(n.maxIn, r.maxIn, "reseed never touches the ceiling");
+                r = n;
+            } catch {
+                assertTrue(wall, "refused with no wall in force");
+            }
+        }
     }
 }

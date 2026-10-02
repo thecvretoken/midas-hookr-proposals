@@ -17,9 +17,9 @@ these extend are listed at the bottom.
 | `BurnAttributionHook` | Attribute each burn contribution to the address that funded it, rebate the largest contributors | `0x20cc` | 22 | 8,207 B |
 | `FloorBidHook` | Park fees as a standing bid the pool owns instead of burning them | `0x2088` | 26 | 13,147 B |
 | Fee-Stream Collateral | Borrow against realised fees instead of selling supply | spec + interfaces | n/a | n/a |
-| `SweepGuard` (library) | Cooldown, sqrt-space reference band and output floor for a conversion through a pool the caller does not control | n/a | 23 | n/a |
+| `SweepGuard` (library) | Cooldown, sqrt-space reference band, size cap, output floor and bounded recovery for a conversion through a pool the caller does not control | n/a | 40 | n/a |
 
-154 tests, all passing. solc 0.8.26, via_ir, optimizer 200 runs, cancun.
+171 tests, all passing. solc 0.8.26, via_ir, optimizer 200 runs, cancun.
 
 `sweep-route-0922/` holds the 22 Sep route-allowlist patch and its tests, pinned: 29 passing.
 
@@ -36,7 +36,8 @@ reference band compared in sqrt space, and a slippage floor against the pre-swap
 They are extracted from the deployed `MidasRWAHook` and are reusable independently of it.
 
 `docs/SWEEP-GUARD.md` covers the library built from them: the API, the four attack scenarios
-with measured results, and the 22 Sep 14% case step by step.
+with measured results, the size cap and recovery path added on 2 Oct, and the 22 Sep 14% case
+step by step.
 
 `docs/FEE-STREAM-COLLATERAL.md` is the design spec for the credit idea, with
 `src/interfaces/IFeeStream.sol` and `src/interfaces/IFeeStreamCredit.sol` encoding it. There is

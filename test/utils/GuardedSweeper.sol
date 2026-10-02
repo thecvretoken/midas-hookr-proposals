@@ -25,8 +25,13 @@ contract GuardedSweeper is IUnlockCallback {
     IPoolManager public immutable pm;
     Currency public immutable tokenIn;
     Currency public immutable tokenOut;
+    address public immutable authority;
     SweepGuard.Params internal p_;
+    SweepGuard.ReseedWalls internal w_;
     mapping(PoolId => SweepGuard.Route) public routes;
+
+    error NotAuthority();
+    error NothingConvertible();
 
     constructor(
         IPoolManager pm_,
@@ -34,19 +39,25 @@ contract GuardedSweeper is IUnlockCallback {
         Currency out_,
         PoolKey[] memory keys,
         uint160[] memory seeds,
-        SweepGuard.Params memory params_
+        uint128[] memory maxIns,
+        SweepGuard.Params memory params_,
+        address authority_,
+        SweepGuard.ReseedWalls memory walls_
     ) {
         SweepGuard.validate(params_);
-        require(keys.length == seeds.length, "len");
+        SweepGuard.validate(walls_);
+        require(keys.length == seeds.length && keys.length == maxIns.length, "len");
         pm = pm_;
         tokenIn = in_;
         tokenOut = out_;
         p_ = params_;
+        w_ = walls_;
+        authority = authority_;
         for (uint256 i; i < keys.length; i++) {
             bool pair = (keys[i].currency0 == in_ && keys[i].currency1 == out_)
                 || (keys[i].currency0 == out_ && keys[i].currency1 == in_);
             require(pair, "route pair");
-            routes[keys[i].toId()].seal(seeds[i]);
+            routes[keys[i].toId()].seal(seeds[i], maxIns[i]);
         }
     }
 
@@ -54,16 +65,29 @@ contract GuardedSweeper is IUnlockCallback {
         return p_;
     }
 
+    /// @notice The recovery path, held by one authority inside the walls fixed at deploy.
+    function reseed(PoolKey calldata route, uint160 target) external returns (uint160) {
+        if (msg.sender != authority) revert NotAuthority();
+        return routes[route.toId()].reseed(w_, target);
+    }
+
+    /// @notice Converts min(balance, capIn) and leaves any remainder for the next interval.
     function sweep(PoolKey calldata route, uint256 callerMinOut) external returns (uint256 out) {
         uint256 bal = tokenIn.balanceOfSelf();
         require(bal > 0, "empty");
         SweepGuard.Params memory p = p_;
+        PoolId id = route.toId();
         uint160 spot = SweepGuard.spotOf(pm, route);
-        uint160 refUsed = routes[route.toId()].admit(p, spot);
-
-        uint256 bounty = (bal * BOUNTY_BPS) / 10_000;
-        uint256 amountIn = bal - bounty;
         bool zeroForOne = route.currency0 == tokenIn;
+        uint256 cap = SweepGuard.capIn(routes[id], p, SweepGuard.liquidityOf(pm, route), spot, zeroForOne);
+        uint160 refUsed = routes[id].admit(p, spot);
+
+        uint256 take = bal < cap ? bal : cap;
+        uint256 bounty = (take * BOUNTY_BPS) / 10_000;
+        uint256 amountIn = take - bounty;
+        // A zero cap means no active liquidity at spot. Convert nothing rather than let the
+        // swap jump the price to the next initialized tick.
+        if (amountIn == 0) revert NothingConvertible();
         uint256 floorOut = SweepGuard.minOut(p, amountIn, zeroForOne, spot, refUsed);
 
         out = abi.decode(pm.unlock(abi.encode(route, zeroForOne, amountIn)), (uint256));
