@@ -1,7 +1,8 @@
 # Midas Hookr proposals
 
 Six market rules proposed to Hookr, five of them built as Uniswap v4 hooks with Foundry test
-suites, one written as a design spec because the market it needs does not exist yet.
+suites, one written as a design spec because the market it needs does not exist yet. Plus
+SweepGuard, the sweep rails from MidasRWAHook as a standalone library.
 
 Prepared by Midas. Everything here is UNAUDITED and NOT DEPLOYED. The two deployed base hooks
 these extend are listed at the bottom.
@@ -16,8 +17,11 @@ these extend are listed at the bottom.
 | `BurnAttributionHook` | Attribute each burn contribution to the address that funded it, rebate the largest contributors | `0x20cc` | 22 | 8,207 B |
 | `FloorBidHook` | Park fees as a standing bid the pool owns instead of burning them | `0x2088` | 26 | 13,147 B |
 | Fee-Stream Collateral | Borrow against realised fees instead of selling supply | spec + interfaces | n/a | n/a |
+| `SweepGuard` (library) | Cooldown, sqrt-space reference band and output floor for a conversion through a pool the caller does not control | n/a | 23 | n/a |
 
-131 tests, all passing. solc 0.8.26, via_ir, optimizer 200 runs, cancun.
+154 tests, all passing. solc 0.8.26, via_ir, optimizer 200 runs, cancun.
+
+`sweep-route-0922/` holds the 22 Sep route-allowlist patch and its tests, pinned: 29 passing.
 
 ## Reviewer briefs
 
@@ -30,6 +34,9 @@ that keep a permissionless conversion safe when the hook has to trade through a 
 not control and has no trustworthy price for: a per-route rate limit, a self-maintained
 reference band compared in sqrt space, and a slippage floor against the pre-swap spot quote.
 They are extracted from the deployed `MidasRWAHook` and are reusable independently of it.
+
+`docs/SWEEP-GUARD.md` covers the library built from them: the API, the four attack scenarios
+with measured results, and the 22 Sep 14% case step by step.
 
 `docs/FEE-STREAM-COLLATERAL.md` is the design spec for the credit idea, with
 `src/interfaces/IFeeStream.sol` and `src/interfaces/IFeeStreamCredit.sol` encoding it. There is
@@ -55,13 +62,14 @@ accounting, and nothing else.
 ## Build
 
 ```bash
-forge build
+bash deps.sh
 forge test -vv
 ```
 
-Dependencies clone into `lib/`: v4-core, v4-periphery, uniswap-hooks (OpenZeppelin, BaseHook
-lives here now), forge-std, openzeppelin-contracts, solmate. Remappings are in
-`remappings.txt`.
+`deps.sh` clones every dependency into `lib/` at the exact commit the suites were run against:
+v4-core, v4-periphery, uniswap-hooks (OpenZeppelin, BaseHook lives here now), forge-std,
+openzeppelin-contracts, solmate. Remappings are in `remappings.txt`. `gold-standard/` keeps its
+own pin, v4-core a22414e4, because the deployed source predates the move of `SwapParams`.
 
 ## The deployed base hooks these extend
 
@@ -86,14 +94,13 @@ in this repository is an immutable with no setter, including for the author.
 
 ## Dependencies
 
-`lib/` is gitignored. Clone the five dependencies before building:
+`lib/` is gitignored. `bash deps.sh` fills it at these commits:
 
-```bash
-mkdir -p lib && cd lib
-git clone --depth 1 https://github.com/Uniswap/v4-core.git
-git clone --depth 1 https://github.com/Uniswap/v4-periphery.git
-git clone --depth 1 https://github.com/OpenZeppelin/uniswap-hooks.git
-git clone --depth 1 https://github.com/foundry-rs/forge-std.git
-git clone --depth 1 https://github.com/OpenZeppelin/openzeppelin-contracts.git
-git clone --depth 1 https://github.com/transmissions11/solmate.git
-```
+| Dependency | Commit |
+|---|---|
+| Uniswap/v4-core | 46c6834698c48bc4a463a86d8420f4eb1d7f3b75 |
+| Uniswap/v4-periphery | 9969eec44cfdf07e24b41de47f40276a58401976 |
+| OpenZeppelin/uniswap-hooks | 9894eda2554e72eed6840e36c794dd8f1e87833a |
+| foundry-rs/forge-std | c6fa5d82a3a287c4ff23f26c8f7e2958aafd32d9 |
+| OpenZeppelin/openzeppelin-contracts | 40a51f7e78852e48d0b128d4ee3d620cbc7d35d8 |
+| transmissions11/solmate | 89365b880c4f3c786bdd453d4b8e8fe410344a69 |

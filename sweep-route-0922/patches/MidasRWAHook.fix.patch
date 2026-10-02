@@ -1,0 +1,67 @@
+diff --git a/src/MidasRWAHook.sol b/src/MidasRWAHook.sol
+index a9ba41a..9248daf 100644
+--- a/src/MidasRWAHook.sol
++++ b/src/MidasRWAHook.sol
+@@ -133,6 +133,11 @@ contract MidasRWAHook is BaseHook, IUnlockCallback {
+     /// @notice Timestamp of the last sweep through each route.
+     mapping(PoolId => uint64) public lastSweepAt;
+ 
++    /// @notice Burn routes permitted at deploy. Written once in the constructor and never
++    ///         again — there is no setter. A sweep may only route through a pool on this
++    ///         list, so a caller cannot substitute a pool they deployed and priced.
++    mapping(PoolId => bool) public allowedRoute;
++
+     // ---------------------------------------------------------------------
+     // Events / Errors
+     // ---------------------------------------------------------------------
+@@ -158,10 +163,17 @@ contract MidasRWAHook is BaseHook, IUnlockCallback {
+     error RouteNotInitialized();
+     error RoutePriceDeviates();
+     error SweepSlippage();
++    error RouteNotAllowed();
+ 
+     // ---------------------------------------------------------------------
+ 
+-    constructor(IPoolManager _poolManager, Currency _gold, address _royaltyRecipient)
++    constructor(
++        IPoolManager _poolManager,
++        Currency _gold,
++        address _royaltyRecipient,
++        PoolKey[] memory _routes,
++        uint160[] memory _seeds
++    )
+         BaseHook(_poolManager)
+     {
+         require(
+@@ -174,6 +186,19 @@ contract MidasRWAHook is BaseHook, IUnlockCallback {
+ 
+         GOLD = _gold;
+         ROYALTY_RECIPIENT = _royaltyRecipient;
++
++        // Seal the burn routes at deploy. Each permitted route must touch GOLD and must
++        // carry a non-zero seed reference, so the very first sweep on it has a real anchor
++        // to fail against rather than adopting whatever spot the caller presents. With no
++        // setter anywhere, this list is fixed for the life of the contract.
++        require(_routes.length == _seeds.length, "routes/seeds length");
++        for (uint256 i = 0; i < _routes.length; i++) {
++            require(_routes[i].currency0 == _gold || _routes[i].currency1 == _gold, "route not gold");
++            require(_seeds[i] != 0, "seed zero");
++            PoolId rid = _routes[i].toId();
++            allowedRoute[rid] = true;
++            refSqrtPriceX96[rid] = _seeds[i];
++        }
+     }
+ 
+     // ---------------------------------------------------------------------
+@@ -372,6 +397,11 @@ contract MidasRWAHook is BaseHook, IUnlockCallback {
+         if (amount == 0) revert NothingToSweep();
+ 
+         PoolId routeId = route.toId();
++        // The route must be one sealed at deploy. Without this a caller could name a GOLD
++        // pool they deployed and priced: its PoolId is unknown here, so its reference and
++        // cooldown are unset, and the sweep would trade the bucket into their pool at their
++        // price. The allowlist is what makes the reference and cooldown mean anything.
++        if (!allowedRoute[routeId]) revert RouteNotAllowed();
+         // Guard on != 0 so the first-ever sweep is not gated by the interval. Without
+         // this the check reads `block.timestamp < MIN_SWEEP_INTERVAL`, which is false on
+         // any real chain but blocks the first sweep on a fresh test chain.
