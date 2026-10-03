@@ -9,12 +9,14 @@ import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {SweepGuard} from "../../src/libraries/SweepGuard.sol";
 
 /// @notice Reference consumer of SweepGuard used by the tests. Holds `tokenIn`, converts all of
 ///         it to `tokenOut` through one of a sealed set of routes, sends the output to SINK and
 ///         pays the caller a bounty. The shape of a permissionless fee-conversion or buyback path.
 contract GuardedSweeper is IUnlockCallback {
+    using StateLibrary for IPoolManager;
     using SweepGuard for SweepGuard.Route;
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
@@ -69,6 +71,22 @@ contract GuardedSweeper is IUnlockCallback {
     function reseed(PoolKey calldata route, uint160 target) external returns (uint160) {
         if (msg.sender != authority) revert NotAuthority();
         return routes[route.toId()].reseed(w_, target);
+    }
+
+    /// @notice What `sweep` on `route` would do right now, without reverting. For keepers, UIs and
+    ///         read-only callers. amountIn and floorOut are net of the bounty, as `sweep` uses them.
+    function previewSweep(PoolKey calldata route) external view returns (SweepGuard.Quote memory q) {
+        PoolId id = route.toId();
+        (uint160 spot,,,) = pm.getSlot0(id);
+        bool zeroForOne = route.currency0 == tokenIn;
+        SweepGuard.Params memory p = p_;
+        q = SweepGuard.preview(
+            routes[id], p, spot, pm.getLiquidity(id), zeroForOne, tokenIn.balanceOfSelf(), block.timestamp
+        );
+        if (q.status == SweepGuard.Status.Ok) {
+            q.amountIn -= (q.amountIn * BOUNTY_BPS) / 10_000;
+            q.floorOut = SweepGuard.minOut(p, q.amountIn, zeroForOne, spot, q.refUsed);
+        }
     }
 
     /// @notice Converts min(balance, capIn) and leaves any remainder for the next interval.

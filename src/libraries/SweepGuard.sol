@@ -46,6 +46,8 @@ import {SqrtPriceMath} from "@uniswap/v4-core/src/libraries/SqrtPriceMath.sol";
 ///
 ///         The core (`next`, `capIn`, `minOut`, `reseedNext`, `quote`) is pure over caller-held
 ///         state. A read-only caller can evaluate it; whatever settles stores the result.
+///         `preview` runs the whole admission sequence and returns a `Status` instead of
+///         reverting, for callers that must not revert: read-only blocks, keepers, UIs.
 /// @dev    UNAUDITED.
 library SweepGuard {
     using StateLibrary for IPoolManager;
@@ -70,6 +72,25 @@ library SweepGuard {
         uint160 ref; // current reference sqrtPriceX96
         uint64 reseededAt; // last reseed, 0 = never
         uint128 maxIn; // absolute per-conversion ceiling, 0 = none
+    }
+
+    /// @notice Why a conversion would be refused, or Ok. `preview` returns it instead of reverting.
+    enum Status {
+        Ok,
+        NotSeeded,
+        NotInitialized,
+        TooSoon,
+        OutOfBand,
+        NothingConvertible
+    }
+
+    /// @notice What a read-only caller needs to decide on a conversion without reverting.
+    struct Quote {
+        Status status;
+        uint256 amountIn; // min(balance, capIn) when Ok, else 0
+        uint256 floorOut; // minimum acceptable output for amountIn
+        uint160 refUsed; // the reference the floor is quoted against
+        Route next; // route state to store if the conversion settles; meaningful only when Ok
     }
 
     struct ReseedWalls {
@@ -111,16 +132,28 @@ library SweepGuard {
         r.maxIn = maxIn;
     }
 
+    /// @notice The admission checks in order, as a status. `next` reverts on anything but Ok and
+    ///         `preview` returns it, so both paths share one set of checks.
+    function status(Route memory r, Params memory p, uint160 spot, uint256 nowTs) internal pure returns (Status) {
+        if (r.seed == 0) return Status.NotSeeded;
+        if (spot == 0) return Status.NotInitialized;
+        if (r.lastAt != 0 && nowTs < uint256(r.lastAt) + p.interval) return Status.TooSoon;
+        uint256 ref = r.ref;
+        if (spot > (ref * (BPS + p.bandBps)) / BPS || spot < (ref * (BPS - p.bandBps)) / BPS) return Status.OutOfBand;
+        return Status.Ok;
+    }
+
     /// @notice Pure admission. Reverts if the conversion must not happen, otherwise returns the
     ///         route state to store. Quote the floor against `r.ref` as passed in, never against
     ///         the returned reference, which has already moved toward this spot.
     function next(Route memory r, Params memory p, uint160 spot, uint256 nowTs) internal pure returns (Route memory) {
-        if (r.seed == 0) revert RouteNotSeeded();
-        if (spot == 0) revert RouteNotInitialized();
-        if (r.lastAt != 0 && nowTs < uint256(r.lastAt) + p.interval) revert TooSoon();
+        Status st = status(r, p, spot, nowTs);
+        if (st == Status.NotSeeded) revert RouteNotSeeded();
+        if (st == Status.NotInitialized) revert RouteNotInitialized();
+        if (st == Status.TooSoon) revert TooSoon();
+        if (st == Status.OutOfBand) revert OutOfBand();
 
         uint256 ref = r.ref;
-        if (spot > (ref * (BPS + p.bandBps)) / BPS || spot < (ref * (BPS - p.bandBps)) / BPS) revert OutOfBand();
 
         uint256 nr = (ref * (p.smoothing - 1) + spot) / p.smoothing;
         if (p.maxDriftBps != 0) {
@@ -131,6 +164,32 @@ library SweepGuard {
         }
         // nr is a weighted mean of two uint160 values, or a clamp inside one, so it fits.
         return Route({seed: r.seed, lastAt: uint64(nowTs), ref: uint160(nr), reseededAt: r.reseededAt, maxIn: r.maxIn});
+    }
+
+    /// @notice The whole admission sequence without reverting: status, the amount a conversion may
+    ///         take (min(balance, capIn)), its floor, and the state to store if it settles. A
+    ///         consumer that pays a bounty out of the amount swaps less and quotes its floor on that.
+    function preview(
+        Route memory r,
+        Params memory p,
+        uint160 spot,
+        uint128 liquidity,
+        bool zeroForOne,
+        uint256 balance,
+        uint256 nowTs
+    ) internal pure returns (Quote memory q) {
+        q.status = status(r, p, spot, nowTs);
+        if (q.status != Status.Ok) return q;
+        uint256 cap = capIn(r, p, liquidity, spot, zeroForOne);
+        uint256 amt = balance < cap ? balance : cap;
+        if (amt == 0) {
+            q.status = Status.NothingConvertible;
+            return q;
+        }
+        q.amountIn = amt;
+        q.refUsed = r.ref;
+        q.floorOut = minOut(p, amt, zeroForOne, spot, r.ref);
+        q.next = next(r, p, spot, nowTs);
     }
 
     /// @notice Storage form of `next`. Returns the reference the floor must be quoted against.

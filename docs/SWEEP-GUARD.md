@@ -1,8 +1,8 @@
 # SweepGuard
 
-The three sweep rails from MidasRWAHook as a library, with the 09-22 route fix built in, run against the four attacks that matter for a fee-conversion or buyback path. Since 2 Oct it also carries a per-conversion size cap and a bounded recovery path.
+The three sweep rails from MidasRWAHook as a library, with the 09-22 route fix built in, run against the four attacks that matter for a fee-conversion or buyback path. Since 2 Oct it also carries a per-conversion size cap, a bounded recovery path, and a non-reverting preview for read-only callers.
 
-Author: Midas. Status: UNAUDITED, not deployed. Source `src/libraries/SweepGuard.sol`. Tests `test/SweepGuard.t.sol` (17, the pure core, three of them fuzzed), `test/SweepGuardScenarios.t.sol` (12) and `test/SweepGuardSizeAndRecovery.t.sol` (11), the last two against a live v4 PoolManager. Every figure below comes from the `-vv` logs of the two scenario files.
+Author: Midas. Status: UNAUDITED, not deployed. Source `src/libraries/SweepGuard.sol`. Tests `test/SweepGuard.t.sol` (18, the pure core, four of them fuzzed), and against a live v4 PoolManager `test/SweepGuardScenarios.t.sol` (12), `test/SweepGuardSizeAndRecovery.t.sol` (11), `test/SweepGuardIntegration.t.sol` (4) and `test/SweepGuardInvariants.t.sol` (6, five of them stateful invariants). Every figure below comes from the `-vv` logs of those files.
 
 ## What it is
 
@@ -10,16 +10,20 @@ A contract that converts its own balance through a pool it does not control call
 
 A route has no reference until it is sealed with a seed, and an unsealed route is refused. That is the 09-22 fix generalised. No path remains where the first conversion adopts whatever spot the caller presents. Seal the route list in a constructor, expose no setter, and the route set is fixed for the life of the contract.
 
-The core is pure. `next(route, params, spot, now)` reverts or returns the state to store, `capIn(...)` returns the largest conversion allowed, `minOut(...)` returns the floor, and `reseedNext(...)` returns a recovered route, so a read-only block can evaluate all of them while the contract that settles stores the result. `seal`, `admit` and `reseed` are the storage forms. `test/utils/GuardedSweeper.sol` is a complete consumer in about a hundred and twenty lines.
+The core is pure. `next(route, params, spot, now)` reverts or returns the state to store, `capIn(...)` returns the largest conversion allowed, `minOut(...)` returns the floor, and `reseedNext(...)` returns a recovered route, so a read-only block can evaluate all of them while the contract that settles stores the result. `preview(...)` runs the whole admission sequence and returns a `Status` instead of reverting. `seal`, `admit` and `reseed` are the storage forms. `test/utils/GuardedSweeper.sol` is a complete consumer in about a hundred and twenty lines.
 
 ```solidity
 struct Params { uint32 interval; uint16 bandBps; uint16 floorBps; uint8 smoothing; bool anchorFloor; uint16 maxDriftBps; uint16 maxImpactBps; }
 struct Route  { uint160 seed; uint64 lastAt; uint160 ref; uint64 reseededAt; uint128 maxIn; }
 struct ReseedWalls { uint16 maxStepBps; uint32 minInterval; uint32 minStall; }
+enum Status { Ok, NotSeeded, NotInitialized, TooSoon, OutOfBand, NothingConvertible }
+struct Quote { Status status; uint256 amountIn; uint256 floorOut; uint160 refUsed; Route next; }
 
 function seal(Route storage r, uint160 seedSqrtPriceX96, uint128 maxIn) internal;     // once per route
 function next(Route memory r, Params memory p, uint160 spot, uint256 nowTs) internal pure returns (Route memory);
 function admit(Route storage r, Params memory p, uint160 spot) internal returns (uint160 refUsed);
+function status(Route memory r, Params memory p, uint160 spot, uint256 nowTs) internal pure returns (Status);
+function preview(Route memory r, Params memory p, uint160 spot, uint128 liquidity, bool zeroForOne, uint256 balance, uint256 nowTs) internal pure returns (Quote memory);
 function capIn(Route memory r, Params memory p, uint128 liquidity, uint160 spot, bool zeroForOne) internal pure returns (uint256);
 function minOut(Params memory p, uint256 amountIn, bool zeroForOne, uint160 spot, uint160 refUsed) internal pure returns (uint256);
 function enforce(uint256 out, uint256 floorOut) internal pure;
@@ -84,9 +88,44 @@ Active liquidity has a weakness of its own: anyone can add it just in time. Pump
 
 Measured with walls of 5% per step, one hour between steps and a six-hour stall. A real move to sqrt 0.8 (price 0.64) after an honest conversion stalls the route out of band. The authority is refused before the six hours are up, a second step inside the hour is refused, and anyone but the authority is refused. Three steps take the reference to 0.95, 0.9025 and 0.857, the band then admits the market, the conversion clears, and the reference follows to 0.843. With the anchored floor and a 2% drift cap, a real 5% move stalls at the floor, one step re-anchors the seed at the market, the conversion clears, and the drift cap holds around the new seed.
 
+## Other fee tiers and prices
+
+The rule carries over to every route tried. Same-tx sandwich at the band edge, attacker P&L in bps of the converted slice's value, from `test_feeRule_holdsAcrossFeeTiersAndPrices`. Tick -195000 is a raw price near 3.3e-9, where an 18-decimal token trades against a 6-decimal one.
+
+| Route fee | Price | Cap at half the fee | Cap at twice the fee |
+|---|---|---|---|
+| 0.05% | 1 | -2814 | +994 |
+| 0.05% | tick -195000 | -2814 | +994 |
+| 0.30% | 1 | -1883 | +1011 |
+| 0.30% | tick -195000 | -1883 | +1011 |
+| 1.00% | 1 | -1938 | +1059 |
+| 1.00% | tick -195000 | -1938 | +1059 |
+
+Price drops out exactly, as the arithmetic says it should. Half of 5 bps rounds down to 2, which is why the 0.05% row loses more.
+
+## Hooked and dynamic-fee routes
+
+The attacker pays the fee in force when he trades, which on a hooked route need not be the nominal one. `test_dynamicFeeRoute_calibrateFromTheLowestFee` runs a dynamic-fee route quoting 0.30% whose hook drops to 0.05%. With the cap calibrated to half the nominal fee (15 bps) the sandwich clears +1314 bps of the slice. Calibrated to half the 0.05% floor (2 bps) it loses 2814. Set `maxImpactBps` from the lowest fee the route can charge. On a Hookr route that is the floor of its policy envelope, not the fee it usually shows.
+
+## Read-only callers
+
+`preview` returns a `Quote`: the status, the amount a conversion may take, its floor, the reference used and the state to store if it settles. Nothing reverts, so a read-only block, a keeper or a UI can ask whether a conversion would go through and on what terms. `status` is the single set of checks behind both paths, so `preview` and `next` cannot drift apart; `testFuzz_preview_neverDisagreesWithNext` checks that across random route states, spots, times, depths and balances, including that every refusal maps to the error `next` would revert with. The reference consumer exposes it as the view `previewSweep`, and `test_preview_matchesWhatTheSweepDoes` holds it to the real sweep: the same amount, a floor the fill clears, the state that gets stored, and `TooSoon`, `OutOfBand` and `NotSeeded` exactly where the sweep refuses.
+
+## Gas
+
+Cold storage, as a real transaction sees it, on the 0.30% route (`test_gas_whatTheGuardCostsPerConversion`). The guard steps alone (read spot and depth, size the cap, admit, quote and enforce the floor) cost about 23,000 gas. `previewSweep` costs about 26,000. A whole sweep through the reference consumer, swap and settlement included, costs about 155,000.
+
+## Compatibility
+
+`bash compat.sh` compiles every library function against v4-core at the commit `deps.sh` pins, which is Uniswap's current main, and at the v4.0.0 release, with solc 0.8.24, 0.8.26 and 0.8.37, legacy and via-IR. All twelve builds pass. The library imports nothing whose location changed between those versions, so the SwapParams move that stopped gold-standard compiling cannot reach it. The reference consumer and the tests use the current layout.
+
+## Random sequences
+
+`test/SweepGuardInvariants.t.sol` hands a fuzzer six actions: an attacker moving the route up to 15% per trade, arbitrage back to fair, keeper sweeps, time jumps of up to three hours, fees arriving in the bucket, and reseed attempts, half of them re-anchoring to the market and half aimed anywhere from half to double the reference. Five properties are checked after every step: no conversion exceeds the ceiling, admitted conversions are at least an interval apart, the reference stays inside the drift cap, every reseed stays inside its walls, and every token is accounted for (the bucket loses only what sweeps take, the keeper receives exactly the bounty, the sweeper never holds output). Each property ran 64 sequences of 64 actions, 20,480 actions in all, with no violation. One seeded run of 600 steps checks all five after each step and reports what it exercised: 26 admitted conversions, the largest exactly the 1.5-token ceiling, 16 reseeds allowed and 98 refused by the walls, the largest step exactly the 5% wall.
+
 ## For fee conversion and buyback
 
-Anchored floor on, drift cap on, `maxImpactBps` at or under half the route fee with `maxIn` at the same level for each route, and `reseed` behind the policy envelope, as a capsule that may move a route's seed by a bounded step at a bounded rate. That is the authority shape the envelope already gives the fee.
+Anchored floor on, drift cap on, `maxImpactBps` at or under half the lowest fee the route can charge with `maxIn` at the same level for each route, and `reseed` behind the policy envelope, as a capsule that may move a route's seed by a bounded step at a bounded rate. That is the authority shape the envelope already gives the fee. A read-only block calls `preview`; whatever settles calls `admit` and stores the result.
 
 The cap turns the cooldown into a throughput limit. Fee accrual faster than one capped slice per interval builds up in the bucket, and the answer then is a shorter interval rather than a bigger slice, since each slice is unprofitable to attack on its own.
 
@@ -117,12 +156,15 @@ The trust that remains is the target. An authority acting in bad faith on a stal
 | A reseed moves at most one step, never inside the interval, never within the stall window, and never touches the ceiling or the conversion clock | `testFuzz_reseed_wallsHoldOverAnySequence`, `test_reseed_wallsHold`, `test_reseed_stepIsClampedAndReanchors` |
 | The authority can only reseed | `test_authority_canOnlyReseed_noSetterSelectorsExist` |
 | A real move recovers in bounded steps | `test_recovery_reseedWalksTheReferenceToARealMove`, `test_recovery_anchoredFloorWithDriftCap` |
+| `preview` never disagrees with `next`, and matches the real sweep | `testFuzz_preview_neverDisagreesWithNext`, `test_preview_matchesWhatTheSweepDoes` |
+| The fee rule holds at every fee tier and price tried, and on a dynamic-fee route when calibrated to its lowest fee | `test_feeRule_holdsAcrossFeeTiersAndPrices`, `test_dynamicFeeRoute_calibrateFromTheLowestFee` |
+| Ceiling, interval, drift cap, reseed walls and token accounting hold across random sequences | `invariant_*` and `test_sixHundredRandomSteps_everyInvariantHoldsAtEveryStep` in `test/SweepGuardInvariants.t.sol` |
 
 ## Failure cases
 
 Every one fails closed. A refused conversion leaves value in the bucket and traps nobody.
 
-A real move past the band, or past the floor when anchored, stalls conversions until the price returns or the authority reseeds. Depth concentrated right at spot over a thin floor makes the impact cap overshoot, since it assumes constant liquidity across its move, and the floor refuses the fill; `maxIn` sized to the depth inside the cap's range is the remedy (`test_sizeCap_constantLiquidityAssumption_floorIsTheBackstop`). No active liquidity at spot converts nothing. A floor under the route fee refuses every conversion. A fee-on-transfer input token fails to settle with the PoolManager and reverts. Accrual faster than one slice per interval builds up in the bucket.
+A real move past the band, or past the floor when anchored, stalls conversions until the price returns or the authority reseeds. A cap calibrated to a dynamic-fee route's nominal fee rather than its lowest lets the sandwich pay when the fee drops (`test_dynamicFeeRoute_calibrateFromTheLowestFee`). Depth concentrated right at spot over a thin floor makes the impact cap overshoot, since it assumes constant liquidity across its move, and the floor refuses the fill; `maxIn` sized to the depth inside the cap's range is the remedy (`test_sizeCap_constantLiquidityAssumption_floorIsTheBackstop`). No active liquidity at spot converts nothing. A floor under the route fee refuses every conversion. A fee-on-transfer input token fails to settle with the PoolManager and reverts. Accrual faster than one slice per interval builds up in the bucket.
 
 ## What testing turned up
 
@@ -160,6 +202,7 @@ The 14% is the band-edge mechanism measured short of the edge. Sweep 1 sat about
 
 ```bash
 bash deps.sh                       # every dependency at a pinned commit
-forge test                         # 171: the 131 plus 40 for the guard
+forge test                         # 182: the 131 plus 51 for the guard
+bash compat.sh                     # the library against v4-core main and v4.0.0, solc 0.8.24 to 0.8.37
 cd sweep-route-0922 && forge test  # 29: the 28 from 09-22 plus the replay
 ```

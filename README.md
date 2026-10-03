@@ -17,9 +17,9 @@ these extend are listed at the bottom.
 | `BurnAttributionHook` | Attribute each burn contribution to the address that funded it, rebate the largest contributors | `0x20cc` | 22 | 8,207 B |
 | `FloorBidHook` | Park fees as a standing bid the pool owns instead of burning them | `0x2088` | 26 | 13,147 B |
 | Fee-Stream Collateral | Borrow against realised fees instead of selling supply | spec + interfaces | n/a | n/a |
-| `SweepGuard` (library) | Cooldown, sqrt-space reference band, size cap, output floor and bounded recovery for a conversion through a pool the caller does not control | n/a | 40 | n/a |
+| `SweepGuard` (library) | Cooldown, sqrt-space reference band, size cap, output floor and bounded recovery for a conversion through a pool the caller does not control | n/a | 51 | n/a |
 
-171 tests, all passing. solc 0.8.26, via_ir, optimizer 200 runs, cancun.
+182 tests, all passing. solc 0.8.26, via_ir, optimizer 200 runs, cancun.
 
 `sweep-route-0922/` holds the 22 Sep route-allowlist patch and its tests, pinned: 29 passing.
 
@@ -71,6 +71,9 @@ forge test -vv
 v4-core, v4-periphery, uniswap-hooks (OpenZeppelin, BaseHook lives here now), forge-std,
 openzeppelin-contracts, solmate. Remappings are in `remappings.txt`. `gold-standard/` keeps its
 own pin, v4-core a22414e4, because the deployed source predates the move of `SwapParams`.
+
+`bash compat.sh` compiles every SweepGuard function against both v4-core main and the v4.0.0
+release, with solc 0.8.24, 0.8.26 and 0.8.37, legacy and via-IR.
 
 ## The deployed base hooks these extend
 

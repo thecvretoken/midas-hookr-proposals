@@ -36,6 +36,18 @@ contract GuardHarness {
         SweepGuard.validate(w);
     }
 
+    function preview(
+        SweepGuard.Route memory cur,
+        SweepGuard.Params memory p,
+        uint160 spot,
+        uint128 l,
+        bool z,
+        uint256 bal,
+        uint256 nowTs
+    ) external pure returns (SweepGuard.Quote memory) {
+        return SweepGuard.preview(cur, p, spot, l, z, bal, nowTs);
+    }
+
     function next(SweepGuard.Route memory cur, SweepGuard.Params memory p, uint160 spot, uint256 nowTs)
         external
         pure
@@ -304,6 +316,51 @@ contract SweepGuardTest is Test {
             } catch {
                 assertTrue(wall, "refused with no wall in force");
             }
+        }
+    }
+
+    /// @dev preview and next can never disagree. For any route state, spot, time, depth and
+    ///      balance: preview says Ok exactly when next admits and something is convertible, its
+    ///      next state equals next's, and every refusal maps to the error next would revert with.
+    function testFuzz_preview_neverDisagreesWithNext(
+        bool seeded,
+        uint160 ref,
+        uint64 lastAt,
+        uint160 spot,
+        uint256 nowTs,
+        uint128 L,
+        uint256 bal,
+        bool zeroForOne
+    ) public view {
+        ref = uint160(bound(ref, Q / 2, uint256(Q) * 2));
+        spot = uint160(bound(spot, 0, uint256(Q) * 3));
+        lastAt = uint64(bound(lastAt, 0, 1e6));
+        nowTs = bound(nowTs, 0, 2e6);
+        bal = bound(bal, 0, 1e30);
+        SweepGuard.Route memory r =
+            SweepGuard.Route({seed: seeded ? Q : 0, lastAt: lastAt, ref: ref, reseededAt: 0, maxIn: 0});
+        SweepGuard.Params memory p = _p(false, 0);
+        p.maxImpactBps = 15;
+        SweepGuard.Quote memory q = h.preview(r, p, spot, L, zeroForOne, bal, nowTs);
+        try h.next(r, p, spot, nowTs) returns (SweepGuard.Route memory n) {
+            if (q.status == SweepGuard.Status.Ok) {
+                assertEq(q.next.ref, n.ref);
+                assertEq(q.next.lastAt, n.lastAt);
+                assertEq(q.refUsed, r.ref);
+                assertGt(q.amountIn, 0);
+                assertLe(q.amountIn, bal);
+            } else {
+                assertEq(uint8(q.status), uint8(SweepGuard.Status.NothingConvertible));
+            }
+        } catch (bytes memory err) {
+            bytes4 sel = bytes4(err);
+            SweepGuard.Status want = sel == SweepGuard.RouteNotSeeded.selector
+                ? SweepGuard.Status.NotSeeded
+                : sel == SweepGuard.RouteNotInitialized.selector
+                    ? SweepGuard.Status.NotInitialized
+                    : sel == SweepGuard.TooSoon.selector ? SweepGuard.Status.TooSoon : SweepGuard.Status.OutOfBand;
+            assertEq(uint8(q.status), uint8(want));
+            assertEq(q.amountIn, 0);
         }
     }
 }

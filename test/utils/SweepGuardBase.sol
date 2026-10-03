@@ -67,7 +67,7 @@ abstract contract SweepGuardBase is Test, Deployers {
     PoolKey route;
     PoolId rid;
 
-    function setUp() public {
+    function setUp() public virtual {
         deployFreshManagerAndRouters();
         (currency0, currency1) = deployMintAndApprove2Currencies();
         SQRT1 = TickMath.getSqrtPriceAtTick(0);
