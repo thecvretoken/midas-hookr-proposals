@@ -2,7 +2,8 @@
 
 Six market rules proposed to Hookr, five of them built as Uniswap v4 hooks with Foundry test
 suites, one written as a design spec because the market it needs does not exist yet. Plus
-SweepGuard, the sweep rails from MidasRWAHook as a standalone library.
+SweepGuard, the sweep rails from MidasRWAHook as a standalone library, and
+MidasSizeCapAdvisory, SweepGuard's size cap as a Hook Block for Hookr's Hook Blocks Market.
 
 Prepared by Midas. Everything here is UNAUDITED and NOT DEPLOYED. The two deployed base hooks
 these extend are listed at the bottom.
@@ -18,10 +19,13 @@ these extend are listed at the bottom.
 | `FloorBidHook` | Park fees as a standing bid the pool owns instead of burning them | `0x2088` | 26 | 13,147 B |
 | Fee-Stream Collateral | Borrow against realised fees instead of selling supply | spec + interfaces | n/a | n/a |
 | `SweepGuard` (library) | Cooldown, sqrt-space reference band, size cap, output floor and bounded recovery for a conversion through a pool the caller does not control | n/a | 51 | n/a |
+| `MidasSizeCapAdvisory` | SweepGuard's size cap as a Hookr Hook Block: refuse a swap over the pool's impact cap or its per-direction ceiling | IHookrAdvisory, BEFORE_SWAP | 19 + kit | 6,936 B |
 
 182 tests, all passing. solc 0.8.26, via_ir, optimizer 200 runs, cancun.
 
 `sweep-route-0922/` holds the 22 Sep route-allowlist patch and its tests, pinned: 29 passing.
+
+`hookr-size-cap/` holds `MidasSizeCapAdvisory` with its own build and pin, against Hookr's contracts at `5ba9dfc9`. It builds with hookr-1's settings (solc 0.8.37, via_ir, optimizer 200 runs, prague). Its 19 refuse-path tests pass, and Hookr's conformance kit runs 7 passing, 1 expected failure (the fuzz that asserts advice never refuses) and 8 pair checks skipped. These are not in the 182.
 
 ## Reviewer briefs
 
@@ -38,6 +42,8 @@ They are extracted from the deployed `MidasRWAHook` and are reusable independent
 `docs/SWEEP-GUARD.md` covers the library built from them: the API, the four attack scenarios
 with measured results, the size cap and recovery path added on 2 Oct, and the 22 Sep 14% case
 step by step.
+
+`docs/SIZE-CAP-ADVISORY.md` is the reviewer brief for the Hook Blocks Market submission: the mechanism, the cap, gas limit and phases it declares, fail-closed and fail-open behavior read from `HookrRoot._advice`, the parameters and their ceilings, the conformance kit's result with the one expected failure and why, and the refuse-path tests.
 
 `docs/FEE-STREAM-COLLATERAL.md` is the design spec for the credit idea, with
 `src/interfaces/IFeeStream.sol` and `src/interfaces/IFeeStreamCredit.sol` encoding it. There is
@@ -75,6 +81,10 @@ own pin, v4-core a22414e4, because the deployed source predates the move of `Swa
 `bash compat.sh` compiles every SweepGuard function against both v4-core main and the v4.0.0
 release, with solc 0.8.24, 0.8.26 and 0.8.37, legacy and via-IR.
 
+`hookr-size-cap/` builds on its own: `cd hookr-size-cap && bash pin.sh && forge test`. `pin.sh`
+checks out Hookr-fun/hookr-contracts at 5ba9dfc9cc3d1b463315518f17dda8bb07f48d3b with its
+`lib/forge-std` and `lib/v4-core` at the commits its `foundry.lock` records.
+
 ## The deployed base hooks these extend
 
 Both on Robinhood Chain (chain 4663), source verified on Blockscout, unaudited, deployed via
@@ -92,8 +102,9 @@ github.com/thecvretoken/midas-rwa-hook, 25 tests passing.
 
 The author receives a template royalty on pools that adopt `GoldStandardHook`, `MidasRWAHook`,
 `PolicyEnvelopeHook` and `MarketHoursGuardHook`, and holds GOLD, which `MidasRWAHook`'s burn
-share buys. `TimeWeightedExitHook`, `BurnAttributionHook` and `FloorBidHook` carry no royalty
-and no deployer share: they are proposed as blocks, not as templates. Every royalty recipient
+share buys. `TimeWeightedExitHook`, `BurnAttributionHook`, `FloorBidHook` and
+`MidasSizeCapAdvisory` carry no royalty and no deployer share: they are proposed as blocks, not
+as templates. Every royalty recipient
 in this repository is an immutable with no setter, including for the author.
 
 ## Dependencies
