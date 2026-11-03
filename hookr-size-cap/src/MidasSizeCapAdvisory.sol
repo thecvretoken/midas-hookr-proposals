@@ -15,33 +15,42 @@ import {IHookrRoot} from "hookr/interfaces/IHookrRoot.sol";
 
 /// @title  MidasSizeCapAdvisory
 /// @author Midas
-/// @notice A Hookr advisory that refuses a swap larger than its pool's size cap. The cap is SweepGuard's `capIn`: the
-///         smaller of an absolute ceiling on what one swap pays in (`maxQuoteIn` for a buy, `maxSubjectIn` for a
-///         sell, raw units) and the amount whose own move of sqrt price at the pool's active liquidity is
-///         `maxImpactBps`. All three are frozen per pool at bind. Over the cap the advice is `reject`; it never
-///         charges an LP surcharge and never takes quote.
+/// @notice A Hookr advisory (IHookrAdvisory) that refuses a swap larger than its pool's size cap. The cap is
+///         SweepGuard's `capIn`: the smaller of an absolute ceiling on what one swap pays in (`maxQuoteIn` for a buy,
+///         `maxSubjectIn` for a sell, raw units) and the amount whose own move of sqrt price at the pool's active
+///         liquidity is `maxImpactBps`. All three are frozen per pool at bind. Over the cap the advice is `reject`; it
+///         never charges an LP surcharge and never takes quote.
 ///
 ///         Declared to Hookr: phases BEFORE_SWAP only; LP-fee cap 0, quote-take cap 0 and subject-take cap 0; gas
-///         limit ADVISORY_GAS, which covers `bind` and the heaviest `beforeSwap` with room to spare. `bind` refuses a
-///         pool or an admission that says otherwise.
+///         limit ADVISORY_GAS, which covers `bind` and the heaviest `beforeSwap` with room to spare; fee-only; and
+///         failOpen false, so the root refuses to open a fail-open pool on it (HookrLane.initializePool). `bind`
+///         refuses a pool or an admission that disagrees on phases, gas or caps. It does not check the pool's fail
+///         mode, because Hookr's conformance kit admits every advisory fail-open and launches a fail-open pool.
 ///
-///         Exact input is checked on the specified amount, which is what the swap pays in before any fee, so the
-///         fees only make the real move smaller. Exact output is checked on the move the output itself makes at
-///         active liquidity, and against the ceiling on the input that output costs at active liquidity grossed up
-///         by the pool's base LP fee, rounded up. The root adds the Rules' reservation to an exact output after the
-///         advice (Auto Burn on a buy, the quote take on a sell), so the pool's own move can be larger by that share.
+///         Exact input is checked on the specified amount, which is all the swap pays in, so the ceiling is exact
+///         for it and the fees only make the real move smaller. Exact output is checked on the move the output itself
+///         makes at active liquidity, and against the ceiling on the input that output costs at active liquidity
+///         grossed up by the pool's base LP fee, rounded up. The context carries no other charge, so for exact output
+///         the ceiling is approximate: the Rules' LP surcharge, quote take and dynamic fee, and the reservation the
+///         root adds to the output after the advice (Auto Burn on a buy, the quote take on a sell), let an exact
+///         output pay and move more than the cap by those charges. sqrtPriceLimitX96 is not read.
 ///
 ///         Active liquidity is the PoolManager's, read at the start of the swap. A price exactly on a tick boundary
 ///         is read on the side the swap moves into: a swap down from a price at tick t's boundary crosses t before it
 ///         trades anything, so its depth is the liquidity below t (the same for up across t + 1). Like SweepGuard,
-///         the impact cap assumes that depth holds across the move, and a pool with no active liquidity at its price
-///         refuses every swap, including one that would jump a gap to the next range. Liquidity added just in time
-///         inflates the impact cap; the ceilings do not move.
+///         the impact cap assumes that depth holds across the move, so a swap whose budget reaches past the edge of
+///         its range can leave the range. Liquidity added just in time inflates the impact cap; the ceilings do not
+///         move.
+///
+///         With no active liquidity at the price, a swap moves through empty ticks to the next range before it
+///         trades, and its move at zero depth says nothing about what it trades. There the impact cap does not
+///         apply: an exact input is bounded by the direction's ceiling alone, which is how a pool run out of its
+///         range trades back in. An exact output cannot be costed at zero depth and is refused.
 ///
 ///         In a fail-closed slot a refusal reverts the swap with the root's SwapRejected. In a fail-open slot the
 ///         root treats any refusal from a fail-open advisory as InvalidModuleResult and reverts the swap too
 ///         (HookrRoot._advice); what differs is a failed call, which a fail-open slot lets through at the admitted
-///         LP-fee cap, here zero. Run it fail-closed.
+///         LP-fee cap, here zero.
 /// @dev    UNAUDITED. No owner, no setter, no upgrade path, no DELEGATECALL. Storage is one slot per bound pool,
 ///         keyed by the binding root, written once in `bind`. Every other function is view or pure. The only external
 ///         calls are view reads: the PoolManager's storage on the swap path, and in `bind` the root's PoolManager
@@ -60,7 +69,7 @@ contract MidasSizeCapAdvisory is IHookrAdvisory {
         uint120 maxSubjectIn;
     }
 
-    /// @notice Why `explainSwap` admits or refuses a swap.
+    /// @notice Why `explainSwap` admits or refuses a swap. NO_LIQUIDITY: an exact output at zero active liquidity.
     enum Reason {
         OK,
         NO_PRICE,
@@ -75,7 +84,7 @@ contract MidasSizeCapAdvisory is IHookrAdvisory {
 
     /// @notice The advisory gas limit this block declares: the admission's gasLimit and every pool's
     ///         advisoryGasLimit. The root forwards it to `bind` too. `bind` refuses a lower one. Measured cold
-    ///         (test_gas_everyPathUnderTheDeclaredLimit): `bind` 48,763, the heaviest `beforeSwap` path 16,509.
+    ///         (test_gas_everyPathUnderTheDeclaredLimit): `bind` 48,881, the heaviest `beforeSwap` path 18,653.
     uint32 public constant ADVISORY_GAS = 100_000;
     /// @notice The phases this block declares: before the swap only. `bind` refuses any other.
     uint8 public constant PHASES = HookrTypes.BEFORE_SWAP;
@@ -195,13 +204,15 @@ contract MidasSizeCapAdvisory is IHookrAdvisory {
     }
 
     /// @notice The largest exact-input swap `root`'s pool admits now in one direction: the direction's ceiling and the
-    ///         input whose own move at active liquidity is maxImpactBps, whichever is lower. Zero when unbound.
+    ///         input whose own move at active liquidity is maxImpactBps, whichever is lower; the ceiling alone at zero
+    ///         active liquidity. Zero when unbound or uninitialized.
     function maxExactInput(address root, PoolId id, bool zeroForOne, bool isBuy) external view returns (uint256) {
         Config memory c = _configs[root][id];
         if (c.maxImpactBps == 0) return 0;
         (uint160 spot, uint128 liquidity) = _depth(id, zeroForOne);
-        if (spot == 0 || liquidity == 0) return 0;
+        if (spot == 0) return 0;
         uint256 ceiling = isBuy ? c.maxQuoteIn : c.maxSubjectIn;
+        if (liquidity == 0) return ceiling;
         uint256 impact = _impactIn(spot, _target(spot, c.maxImpactBps, zeroForOne), liquidity, zeroForOne);
         return impact < ceiling ? impact : ceiling;
     }
@@ -216,18 +227,23 @@ contract MidasSizeCapAdvisory is IHookrAdvisory {
         bool zeroForOne = x.zeroForOne;
         (uint160 spot, uint128 liquidity) = _depth(x.id, zeroForOne);
         if (spot == 0) return (Reason.NO_PRICE, 0, 0);
-        if (liquidity == 0) return (Reason.NO_LIQUIDITY, 0, 0);
         limitIn = x.isBuy ? c.maxQuoteIn : c.maxSubjectIn;
-        uint160 target = _target(spot, c.maxImpactBps, zeroForOne);
         int256 specified = x.amountSpecified;
         if (specified < 0) {
             amountIn = specified == type(int256).min ? type(uint256).max : uint256(-specified);
             if (amountIn > limitIn) return (Reason.OVER_CEILING, amountIn, limitIn);
-            if (amountIn > _impactIn(spot, target, liquidity, zeroForOne)) {
-                return (Reason.OVER_IMPACT, amountIn, limitIn);
+            // At zero depth the swap crosses empty ticks before it trades: the ceiling alone bounds it.
+            if (liquidity != 0) {
+                uint160 edge = _target(spot, c.maxImpactBps, zeroForOne);
+                if (amountIn > _impactIn(spot, edge, liquidity, zeroForOne)) {
+                    return (Reason.OVER_IMPACT, amountIn, limitIn);
+                }
             }
             return (Reason.OK, amountIn, limitIn);
         }
+        // An exact output's cost cannot be read at zero depth.
+        if (liquidity == 0) return (Reason.NO_LIQUIDITY, 0, limitIn);
+        uint160 target = _target(spot, c.maxImpactBps, zeroForOne);
         uint256 amountOut = uint256(specified);
         // The output the move to `target` pays out, rounded down: token1 on the way down, token0 on the way up.
         uint256 impactOut = zeroForOne

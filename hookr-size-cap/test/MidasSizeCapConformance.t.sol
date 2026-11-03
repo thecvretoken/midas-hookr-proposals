@@ -13,8 +13,10 @@ import {MidasSizeCapAdvisory} from "../src/MidasSizeCapAdvisory.sol";
 /// @notice Hookr's AdvisoryConformance kit, unmodified, run against MidasSizeCapAdvisory on a real HookrRoot (with
 ///         HookrRules, the launcher, router and quoter) on one PoolManager and one HookrRegistry.
 /// @dev Only the kit's author hooks are filled in. The block serves HookrRoot pools only: a pair root's advisory
-///      returns a surcharge and cannot refuse, so the seven pair checks are skipped. It is admitted with the cap,
-///      gas limit and phases it declares: LP-fee cap 0, ADVISORY_GAS, BEFORE_SWAP.
+///      returns a surcharge and cannot refuse, so the eight pair checks are skipped. It is admitted with the cap,
+///      gas limit and phases it declares: LP-fee cap 0, ADVISORY_GAS, BEFORE_SWAP. The kit builds the admission
+///      itself and always sets failOpen true, since it launches a fail-open pool; the block declares failOpen false
+///      (MidasSizeCapAdvisory.t.sol: test_declaredAdmission_refusesAFailOpenPool), and this run keeps the kit's.
 ///
 ///      Expected result: every root check passes except testFuzz_kit_root_surchargeWithinCap, which fails on its
 ///      `assertFalse(advice.reject, "reject")`. The kit is written for fee advisories and asserts that advice never

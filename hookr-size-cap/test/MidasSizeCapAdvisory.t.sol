@@ -15,6 +15,8 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {SqrtPriceMath} from "@uniswap/v4-core/src/libraries/SqrtPriceMath.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
+import {PoolModifyLiquidityTest} from "@uniswap/v4-core/src/test/PoolModifyLiquidityTest.sol";
+import {ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {HookrTypes} from "hookr/types/HookrTypes.sol";
 import {IHookrAdvisory} from "hookr/interfaces/IHookrAdvisory.sol";
 import {IHookrRegistry} from "hookr/interfaces/IHookrRegistry.sol";
@@ -27,13 +29,14 @@ import {PeripheryFixture} from "hookr-test/periphery/PeripheryFixture.sol";
 import {MidasSizeCapAdvisory} from "../src/MidasSizeCapAdvisory.sol";
 
 /// @notice The refuse path the kit does not cover, run against a real HookrRoot, HookrRules, launcher, router and
-///         quoter on one PoolManager and one HookrRegistry (Hookr's PeripheryFixture, unmodified). The block is
-///         admitted as it declares itself: ADVISORY, every cap zero, ADVISORY_GAS, BEFORE_SWAP, fee-only and
-///         fail-open capable, and bound by three pools launched through HookrLauncher.launchAdvised:
-///         - closedKey, fail-closed: 50 bps, maxQuoteIn 1e21, maxSubjectIn 2e21. The ceilings bind (the 50 bps impact
-///           cap is about 5e21 at the pool's L = 1e24).
-///         - openKey, fail-open, same terms.
-///         - impactKey, fail-closed: 10 bps, both ceilings at MAX_IN. The impact cap binds, about 1e21.
+///         quoter on one PoolManager and one HookrRegistry (Hookr's PeripheryFixture, unmodified). `cap` is
+///         admitted as it declares itself: ADVISORY, every cap zero, ADVISORY_GAS, BEFORE_SWAP, fee-only, failOpen
+///         false. A second deployment of the same code, `capOpen`, is admitted fail-open the way Hookr's kit admits
+///         every advisory, for the fail-open slot tests. Pools launched through HookrLauncher.launchAdvised:
+///         - closedKey, `cap`, fail-closed: 50 bps, maxQuoteIn 1e21, maxSubjectIn 2e21. The ceilings bind (the 50 bps
+///           impact cap is about 5e21 at the pool's L = 1e24).
+///         - openKey, `capOpen`, fail-open, same terms.
+///         - impactKey, `cap`, fail-closed: 10 bps, both ceilings at MAX_IN. The impact cap binds, about 1e21.
 ///         Every pool opens at price 1, exactly on tick 0's boundary, with L = 1e24 across ticks -60000..60000.
 contract MidasSizeCapAdvisoryTest is PeripheryFixture {
     using PoolIdLibrary for PoolKey;
@@ -45,18 +48,20 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
     uint256 internal constant SUBJECT_IN = 2e21;
 
     MidasSizeCapAdvisory internal cap;
+    MidasSizeCapAdvisory internal capOpen;
     uint32 internal gasLimit;
     PoolKey internal closedKey;
     PoolKey internal openKey;
     PoolKey internal impactKey;
     bytes32 internal closedFamily;
-    uint256 internal tokenSalt;
 
     function setUp() public {
         _setUpPeriphery();
         cap = new MidasSizeCapAdvisory(manager);
+        capOpen = new MidasSizeCapAdvisory(manager);
         gasLimit = cap.ADVISORY_GAS();
-        _admit(address(cap));
+        _admit(address(cap), false);
+        _admit(address(capOpen), true);
         (closedKey, closedFamily) = _launch(_subject(), false, _terms(50, QUOTE_IN, SUBJECT_IN));
         (openKey,) = _launch(_subject(), true, _terms(50, QUOTE_IN, SUBJECT_IN));
         (impactKey,) = _launch(_subject(), false, _terms(10, cap.MAX_IN(), cap.MAX_IN()));
@@ -83,16 +88,27 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
         assertGt(got, 0, "filled");
     }
 
-    /// @notice Fail-open: the same refusal reverts the swap too, as InvalidModuleResult(advisory) rather than
-    ///         SwapRejected, because HookrRoot._advice refuses `reject` from any fail-open advisory. The block gives
-    ///         the same advice in both slots; an in-cap swap fills.
+    /// @notice The admission the block declares (failOpen false) keeps it out of fail-open slots: the root refuses
+    ///         to open a fail-open pool naming it (HookrLane.initializePool), and the launch reverts.
+    function test_declaredAdmission_refusesAFailOpenPool() public {
+        HookrToken subject = _subject();
+        vm.expectRevert(IHookrRootEvents.InvalidConfig.selector);
+        this.launchFor(address(cap), subject, true, _terms(50, QUOTE_IN, SUBJECT_IN));
+        (PoolKey memory key,) = _launchWith(address(cap), subject, false, _terms(50, QUOTE_IN, SUBJECT_IN));
+        assertFalse(root.poolConfig(key.toId()).advisoryFailOpen, "the same pool opens fail-closed");
+    }
+
+    /// @notice Fail-open, under a fail-open admission as the kit grants: the same refusal reverts the swap too, as
+    ///         InvalidModuleResult(advisory) where a fail-closed slot gives SwapRejected, because HookrRoot._advice
+    ///         refuses `reject` from any fail-open advisory. The block gives the same advice in both slots; an in-cap
+    ///         swap fills.
     function test_failOpen_refusalRevertsTheSwap() public {
         HookrTypes.SwapContext memory open = _ctx(openKey, true, true, QUOTE_IN + 1);
         HookrTypes.SwapContext memory closed = _ctx(closedKey, true, true, QUOTE_IN + 1);
-        assertTrue(_advise(open).reject, "open slot advice");
+        assertTrue(_adviseWith(capOpen, open).reject, "open slot advice");
         assertTrue(_advise(closed).reject, "closed slot advice");
         bytes memory invalid =
-            _wrapped(abi.encodeWithSelector(IHookrRootEvents.InvalidModuleResult.selector, address(cap)));
+            _wrapped(abi.encodeWithSelector(IHookrRootEvents.InvalidModuleResult.selector, address(capOpen)));
         _routeReverts(openKey, true, true, QUOTE_IN + 1, invalid);
         _routeReverts(openKey, false, true, SUBJECT_IN + 1, invalid);
         (, uint256 got) = _route(openKey, true, true, QUOTE_IN);
@@ -105,6 +121,7 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
     ///         (testFuzz_neverRevertsOnABoundPool), so this needs a mocked failure.
     function test_failOpen_failedCallLetsAnOverCapSwapThrough() public {
         uint256 nativeFee = quoter.quote(_swap(openKey, true, true, uint128(QUOTE_IN)), trader).lpFeePips;
+        vm.mockCallRevert(address(capOpen), abi.encodeWithSelector(IHookrAdvisory.beforeSwap.selector), "down");
         vm.mockCallRevert(address(cap), abi.encodeWithSelector(IHookrAdvisory.beforeSwap.selector), "down");
         assertEq(
             quoter.quote(_swap(openKey, true, true, uint128(QUOTE_IN + 1)), trader).lpFeePips, nativeFee, "no surcharge"
@@ -161,7 +178,7 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
             (uint160 before,,,) = manager.getSlot0(impactKey.toId());
             _route(impactKey, isBuy, true, expected);
             (uint160 afterSwap,,,) = manager.getSlot0(impactKey.toId());
-            assertLe(_moveBps(before, afterSwap), 10, "realised move within the cap");
+            _assertMoveWithin(before, afterSwap, 10);
             console2.log(isBuy ? "impact cap, exact-input buy" : "impact cap, exact-input sell", expected);
             vm.revertToState(snap);
         }
@@ -195,13 +212,7 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
             bool isBuy = i == 0;
             bool zeroForOne = _zeroForOne(closedKey, isBuy);
             uint256 ceiling = isBuy ? QUOTE_IN : SUBJECT_IN;
-            uint256 lo = 1;
-            uint256 hi = ceiling;
-            while (lo < hi) {
-                uint256 mid = (lo + hi + 1) / 2;
-                if (_costIn(closedKey.toId(), zeroForOne, mid) <= ceiling) lo = mid;
-                else hi = mid - 1;
-            }
+            uint256 lo = _largestExactOutput(closedKey, isBuy, ceiling);
             (bool ok, MidasSizeCapAdvisory.Reason reason, uint256 costIn, uint256 limitIn) =
                 _explain(_ctx(closedKey, isBuy, false, lo));
             assertTrue(ok, "largest output that fits");
@@ -219,50 +230,153 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
         }
     }
 
+    /// @notice A limit, measured. The exact-output ceiling grosses up by the base LP fee only, so through the router
+    ///         the largest exact output the block admits pays the Rules' other charges on top: above the ceiling, by a
+    ///         few percent on this fixture's Rules. The exact-input ceiling is exact (test_failClosed_*).
+    function test_limit_exactOutputPaysAboveTheCeilingByTheRulesCharges() public {
+        for (uint256 i; i < 2; ++i) {
+            uint256 snap = vm.snapshotState();
+            bool isBuy = i == 0;
+            uint256 ceiling = isBuy ? QUOTE_IN : SUBJECT_IN;
+            uint256 out = _largestExactOutput(closedKey, isBuy, ceiling);
+            (bool ok,,,) = _explain(_ctx(closedKey, isBuy, false, out));
+            assertTrue(ok, "admitted");
+            (uint256 paid,) = _route(closedKey, isBuy, false, out);
+            console2.log(isBuy ? "exact-output buy, ceiling" : "exact-output sell, ceiling", ceiling);
+            console2.log("  paid", paid);
+            if (paid > ceiling) console2.log("  over, in 1e-4 bps", (paid - ceiling) * 1e8 / ceiling);
+            assertLe(paid, ceiling * 105 / 100, "within the Rules' charges");
+            vm.revertToState(snap);
+        }
+    }
+
+    /// @notice A limit, measured. The root reserves the Auto Burn (buys) or the quote take (sells) on top of an exact
+    ///         output after the advice, so the largest exact output within the impact cap moves the price a little
+    ///         past it.
+    function test_limit_exactOutputMovesPastTheImpactCapByTheReservation() public {
+        for (uint256 i; i < 2; ++i) {
+            uint256 snap = vm.snapshotState();
+            bool isBuy = i == 0;
+            uint256 maxOut = _impactOut(impactKey.toId(), 10, _zeroForOne(impactKey, isBuy));
+            (uint160 before,,,) = manager.getSlot0(impactKey.toId());
+            _route(impactKey, isBuy, false, maxOut);
+            (uint160 afterSwap,,,) = manager.getSlot0(impactKey.toId());
+            uint256 d = afterSwap > before ? afterSwap - before : before - afterSwap;
+            console2.log(
+                isBuy ? "exact-output buy move, 1e-6 bps" : "exact-output sell move, 1e-6 bps", d * 1e10 / before
+            );
+            assertLe(d * BPS, 10 * uint256(before) * 102 / 100, "within 2% of the cap");
+            vm.revertToState(snap);
+        }
+    }
+
     // ------------------------------------------------------------------------------------------------------------
     // No active liquidity, and a price on a tick boundary
     // ------------------------------------------------------------------------------------------------------------
 
-    /// @notice With the whole launch position withdrawn there is no active liquidity, and every swap is refused, one
-    ///         unit included, either way and either type.
-    function test_noActiveLiquidity_refusesEverySwap() public {
+    /// @notice With the whole launch position withdrawn there is no active liquidity. The impact cap does not apply at
+    ///         zero depth: an exact input is bounded by its direction's ceiling alone (admitted at it, refused one
+    ///         over), and an exact output, which cannot be costed at zero depth, is refused.
+    function test_noActiveLiquidity_ceilingAloneBoundsExactInput() public {
         uint128 held = launcher.position(closedFamily, 0).liquidity;
         launcher.withdraw(closedFamily, 0, held, 0, 0, address(this), vm.getBlockTimestamp());
         assertEq(manager.getLiquidity(closedKey.toId()), 0, "no liquidity");
-        for (uint256 i; i < 4; ++i) {
-            (bool ok, MidasSizeCapAdvisory.Reason reason,,) = _explain(_ctx(closedKey, i & 1 == 0, i & 2 == 0, 1));
-            assertFalse(ok, "refused");
+        for (uint256 i; i < 2; ++i) {
+            bool isBuy = i == 0;
+            uint256 ceiling = isBuy ? QUOTE_IN : SUBJECT_IN;
+            assertEq(cap.maxExactInput(address(root), closedKey.toId(), _zeroForOne(closedKey, isBuy), isBuy), ceiling);
+            (bool ok, MidasSizeCapAdvisory.Reason reason,,) = _explain(_ctx(closedKey, isBuy, true, ceiling));
+            assertTrue(ok, "exact input at the ceiling");
+            (ok, reason,,) = _explain(_ctx(closedKey, isBuy, true, ceiling + 1));
+            assertFalse(ok, "one over the ceiling");
+            assertEq(uint8(reason), uint8(MidasSizeCapAdvisory.Reason.OVER_CEILING), "reason");
+            (ok, reason,,) = _explain(_ctx(closedKey, isBuy, false, 1));
+            assertFalse(ok, "exact output");
             assertEq(uint8(reason), uint8(MidasSizeCapAdvisory.Reason.NO_LIQUIDITY), "reason");
-            assertEq(cap.maxExactInput(address(root), closedKey.toId(), i & 1 == 0, i & 2 == 0), 0, "max input");
         }
-        _refused(closedKey, true, true, 1e18);
     }
 
     /// @notice A launch whose single-sided range ends exactly at the opening price, as a new-token launch does. With
     ///         the subject as currency1 the range is -60000..0 and the PoolManager reports zero active liquidity at
     ///         tick 0, yet a buy moves down across tick 0 into the full range first. The block reads the side the swap
-    ///         moves into: the buy is admitted at the range's depth and fills, and a sell, which has no liquidity to
-    ///         move into, is refused. With the subject as currency0 (range 0..60000) the same holds the other way up.
+    ///         moves into: the buy is held to the impact cap at the range's own depth (computed here from the
+    ///         position's liquidity), admitted at it, refused one over, and fills within the cap. A sell moves away
+    ///         from the range into zero depth, where only the ceiling applies. With the subject as currency0 (range
+    ///         0..60000) the same holds the other way up.
     function test_priceOnTickBoundary_readsTheSideTheSwapMovesInto() public {
+        uint256 maxIn = cap.MAX_IN();
         for (uint256 i; i < 2; ++i) {
             bool subjectIs0 = i == 1;
             HookrToken subject = _subjectOn(subjectIs0);
-            (PoolKey memory key,) = _launchSingleSided(subject, _terms(50, QUOTE_IN, SUBJECT_IN));
+            (PoolKey memory key, bytes32 family) = _launchSingleSided(subject, _terms(10, maxIn, maxIn));
             (uint160 spot, int24 tick,,) = manager.getSlot0(key.toId());
             assertEq(spot, SQRT_ONE, "price");
             assertEq(tick, 0, "tick");
             assertEq(manager.getLiquidity(key.toId()) == 0, !subjectIs0, "slot0 depth");
             bool buyDown = _zeroForOne(key, true);
             assertEq(buyDown, !subjectIs0, "a buy moves into the range");
-            uint256 buyCap = cap.maxExactInput(address(root), key.toId(), buyDown, true);
-            assertEq(buyCap, QUOTE_IN, "buy cap at the range's depth");
-            assertFalse(_advise(_ctx(key, true, true, QUOTE_IN)).reject, "buy admitted");
-            (bool ok, MidasSizeCapAdvisory.Reason reason,,) = _explain(_ctx(key, false, true, 1));
-            assertFalse(ok, "sell refused");
-            assertEq(uint8(reason), uint8(MidasSizeCapAdvisory.Reason.NO_LIQUIDITY), "nothing to sell into");
-            (, uint256 got) = _route(key, true, true, QUOTE_IN);
-            assertGt(got, 0, "the buy filled");
+            uint256 expected = _capAt(spot, launcher.position(family, 0).liquidity, 10, buyDown);
+            assertEq(
+                cap.maxExactInput(address(root), key.toId(), buyDown, true), expected, "buy cap at the range's depth"
+            );
+            assertLt(expected, maxIn, "the impact cap binds");
+            (bool ok, MidasSizeCapAdvisory.Reason reason,,) = _explain(_ctx(key, true, true, expected + 1));
+            assertFalse(ok, "one over");
+            assertEq(uint8(reason), uint8(MidasSizeCapAdvisory.Reason.OVER_IMPACT), "reason");
+            assertEq(cap.maxExactInput(address(root), key.toId(), !buyDown, false), maxIn, "sell: zero depth");
+            (ok, reason,,) = _explain(_ctx(key, false, false, 1));
+            assertEq(uint8(reason), uint8(MidasSizeCapAdvisory.Reason.NO_LIQUIDITY), "exact-output sell");
+            assertFalse(_advise(_ctx(key, true, true, expected)).reject, "at the cap");
+            _route(key, true, true, expected);
+            (uint160 afterBuy,,,) = manager.getSlot0(key.toId());
+            _assertMoveWithin(spot, afterBuy, 10);
         }
+    }
+
+    /// @notice The freeze the independent review found, and its fix, with the subject as currency1. A single in-cap
+    ///         sell whose impact budget reaches past the top of a single-sided launch range leaves the range, and with
+    ///         the router's price limit runs to tick 887271, above the largest tick a position at spacing 60 can cover,
+    ///         so no liquidity can ever be active there. Before the fix the block refused every swap at zero depth and
+    ///         the pool was frozen for good. Now an exact-input buy up to the ceiling is admitted, crosses the empty
+    ///         ticks back into the range, and trading resumes.
+    function test_runOut_subjectAsCurrency1_inCapBuyBringsThePoolBack() public {
+        _runOutAndRecover(false);
+    }
+
+    /// @notice The mirror case: the subject as currency0, range 0..60000, the in-cap sell runs down to MIN_TICK, below
+    ///         the smallest usable tick, and an in-cap buy brings the pool back.
+    function test_runOut_subjectAsCurrency0_inCapBuyBringsThePoolBack() public {
+        _runOutAndRecover(true);
+    }
+
+    /// @notice A limit that remains. A swap that stops in a gap between ranges at a usable tick (here by its price
+    ///         limit) can have dust liquidity placed over that price. The impact cap then reads the dust and refuses
+    ///         anything but dust-sized swaps until real depth is added at that price, after which trading resumes.
+    function test_limit_dustLiquidityInAGap_refusesUntilDepthIsAdded() public {
+        HookrToken subject = _subjectOn(false);
+        (PoolKey memory key,) = _launchSingleSided(subject, _terms(50, QUOTE_IN, SUBJECT_IN));
+        (, uint256 got) = _route(key, true, true, 1e18);
+        IHookrRouter.Swap memory sell = _swap(key, false, true, uint128(got * 3));
+        sell.sqrtPriceLimitX96 = TickMath.getSqrtPriceAtTick(120);
+        vm.prank(trader);
+        router.swap(sell, address(0), new uint256[](0));
+        (, int24 tick,,) = manager.getSlot0(key.toId());
+        assertEq(tick, 120, "stopped in the gap above the range");
+        assertEq(manager.getLiquidity(key.toId()), 0, "zero depth");
+        assertFalse(_advise(_ctx(key, true, true, 1e15)).reject, "zero depth: the ceiling alone");
+        PoolModifyLiquidityTest lp = _lp(key);
+        lp.modifyLiquidity(
+            key, ModifyLiquidityParams({tickLower: 60, tickUpper: 180, liquidityDelta: 1e3, salt: 0}), ""
+        );
+        (bool ok, MidasSizeCapAdvisory.Reason reason,,) = _explain(_ctx(key, true, true, 1e15));
+        assertFalse(ok, "dust depth refuses");
+        assertEq(uint8(reason), uint8(MidasSizeCapAdvisory.Reason.OVER_IMPACT), "reason");
+        lp.modifyLiquidity(
+            key, ModifyLiquidityParams({tickLower: 0, tickUpper: 180, liquidityDelta: 1e21, salt: 0}), ""
+        );
+        assertFalse(_advise(_ctx(key, true, true, 1e15)).reject, "real depth admits");
+        (, uint256 bought) = _route(key, true, true, 1e15);
+        assertGt(bought, 0, "trading resumes");
     }
 
     // ------------------------------------------------------------------------------------------------------------
@@ -352,7 +466,7 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
                 abi.encodeWithSelector(MidasSizeCapAdvisory.InvalidTerms.selector, 2)
             )
         );
-        this.launchFor(subject, false, _terms(0, QUOTE_IN, SUBJECT_IN));
+        this.launchFor(address(cap), subject, false, _terms(0, QUOTE_IN, SUBJECT_IN));
     }
 
     // ------------------------------------------------------------------------------------------------------------
@@ -564,13 +678,22 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
     // ------------------------------------------------------------------------------------------------------------
 
     /// @notice On a bound pool beforeSwap never reverts and never runs out of ADVISORY_GAS, for any specified amount,
-    ///         direction, base fee and pool price (the price is pushed anywhere, out of range included, with the block
-    ///         mocked out of the way for the push). Its advice is only ever a reject: no surcharge, no take, no
-    ///         recipient. A fail-open slot would let a reverting call through, so this is the property that matters
-    ///         there.
-    function testFuzz_neverRevertsOnABoundPool(bool isBuy, int256 amount, uint24 fee, uint256 push, bool pushUp)
-        public
-    {
+    ///         direction and base fee, at depths from the whole launch position down to none, and at any price one
+    ///         swap can push the fixture pool to, out of range included (the block is mocked out of the way for the
+    ///         push). Its advice is only ever a reject: no surcharge, no take, no recipient. A fail-open slot would let
+    ///         a reverting call through, so this is the property that matters there. MidasSizeCapMath.t.sol covers
+    ///         arbitrary PoolManager states.
+    function testFuzz_neverRevertsOnABoundPool(
+        bool isBuy,
+        int256 amount,
+        uint24 fee,
+        uint256 push,
+        bool pushUp,
+        uint8 thin
+    ) public {
+        uint128 held = launcher.position(closedFamily, 0).liquidity;
+        uint128 keep = thin % 8 == 7 ? 0 : uint128(held / 10 ** (thin % 8));
+        if (keep < held) launcher.withdraw(closedFamily, 0, held - keep, 0, 0, address(this), vm.getBlockTimestamp());
         push = bound(push, 0, 4e25);
         if (push != 0) {
             vm.mockCall(
@@ -613,7 +736,7 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
         (uint160 before,,,) = manager.getSlot0(impactKey.toId());
         _route(impactKey, isBuy, true, amount);
         (uint160 afterSwap,,,) = manager.getSlot0(impactKey.toId());
-        assertLe(_moveBps(before, afterSwap), 10, "realised move");
+        _assertMoveWithin(before, afterSwap, 10);
     }
 
     // ------------------------------------------------------------------------------------------------------------
@@ -624,8 +747,9 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
         return abi.encode(impactBps, quoteIn, subjectIn);
     }
 
-    /// @dev Admits the block on the root as it declares itself, through the registry's timelock.
-    function _admit(address advisory) internal {
+    /// @dev Admits a deployment of the block on the root through the registry's timelock: as it declares itself, or
+    ///         fail-open as the kit admits every advisory.
+    function _admit(address advisory, bool failOpen) internal {
         IHookrRegistry.Admission memory a = IHookrRegistry.Admission({
             kind: IHookrRegistry.Kind.ADVISORY,
             implementation: advisory,
@@ -635,7 +759,7 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
             gasLimit: MidasSizeCapAdvisory(advisory).ADVISORY_GAS(),
             phaseMask: MidasSizeCapAdvisory(advisory).PHASES(),
             feeOnly: true,
-            failOpen: true
+            failOpen: failOpen
         });
         registry.queue(registry.ADMIT(), abi.encode(address(root), a));
         vm.warp(vm.getBlockTimestamp() + registry.delay());
@@ -660,13 +784,21 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
         revert("no subject on that side");
     }
 
-    /// @dev Launches one pool of `subject` against tokenB on the root, bound to the block with `data`.
+    /// @dev Launches one pool of `subject` against tokenB on the root, bound with `data` to `cap` (fail-closed) or to
+    ///      `capOpen` (fail-open).
     function _launch(HookrToken subject, bool failOpen, bytes memory data)
         internal
         returns (PoolKey memory key, bytes32 family)
     {
+        return _launchWith(failOpen ? address(capOpen) : address(cap), subject, failOpen, data);
+    }
+
+    function _launchWith(address advisory, HookrToken subject, bool failOpen, bytes memory data)
+        internal
+        returns (PoolKey memory key, bytes32 family)
+    {
         IHookrLauncher.Member[] memory members = new IHookrLauncher.Member[](1);
-        members[0] = _advised(failOpen);
+        members[0] = _advised(advisory, failOpen);
         bytes[] memory configs = new bytes[](1);
         configs[0] = data;
         (family,) = launcher.launchAdvised(
@@ -680,8 +812,8 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
     }
 
     /// @dev External entry for a launch whose revert a test expects.
-    function launchFor(HookrToken subject, bool failOpen, bytes memory data) external {
-        _launch(subject, failOpen, data);
+    function launchFor(address advisory, HookrToken subject, bool failOpen, bytes memory data) external {
+        _launchWith(advisory, subject, failOpen, data);
     }
 
     /// @dev A launch whose subject-only range ends exactly at the opening price, the shape of a new-token launch.
@@ -691,7 +823,7 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
     {
         bool subjectIs0 = address(subject) < address(tokenB);
         IHookrLauncher.Member[] memory members = new IHookrLauncher.Member[](1);
-        members[0] = _advised(false);
+        members[0] = _advised(address(cap), false);
         members[0].tickLower = subjectIs0 ? int24(0) : int24(-60_000);
         members[0].tickUpper = subjectIs0 ? int24(60_000) : int24(0);
         uint160 lower = TickMath.getSqrtPriceAtTick(members[0].tickLower);
@@ -714,9 +846,9 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
         key = launcher.position(family, 0).key;
     }
 
-    function _advised(bool failOpen) internal view returns (IHookrLauncher.Member memory m) {
+    function _advised(address advisory, bool failOpen) internal view returns (IHookrLauncher.Member memory m) {
         m = _member(Currency.wrap(address(tokenB)));
-        m.config.advisory = address(cap);
+        m.config.advisory = advisory;
         m.config.advisoryGasLimit = gasLimit;
         m.config.advisoryPhases = HookrTypes.BEFORE_SWAP;
         m.config.advisoryFailOpen = failOpen;
@@ -781,8 +913,15 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
     }
 
     function _advise(HookrTypes.SwapContext memory x) internal returns (HookrTypes.Advice memory) {
+        return _adviseWith(cap, x);
+    }
+
+    function _adviseWith(MidasSizeCapAdvisory advisory, HookrTypes.SwapContext memory x)
+        internal
+        returns (HookrTypes.Advice memory)
+    {
         vm.prank(address(root));
-        return cap.beforeSwap(x);
+        return advisory.beforeSwap(x);
     }
 
     function _explain(HookrTypes.SwapContext memory x)
@@ -868,9 +1007,76 @@ contract MidasSizeCapAdvisoryTest is PeripheryFixture {
         return FullMath.mulDivRoundingUp(c, PIPS, PIPS - root.poolConfig(id).baseLpFeePips);
     }
 
-    /// @dev |after - before| / before in bps of sqrt price, rounded down.
-    function _moveBps(uint160 before, uint160 afterSwap) internal pure returns (uint256) {
+    /// @dev Asserts |after - before| <= bps / 10,000 of before, in sqrt price, exactly.
+    function _assertMoveWithin(uint160 before, uint160 afterSwap, uint256 bps) internal pure {
         uint256 d = afterSwap > before ? afterSwap - before : before - afterSwap;
-        return d * BPS / before;
+        assertLe(d * BPS, bps * uint256(before), "realised move within the cap");
+    }
+
+    /// @dev SweepGuard's impact term at a given spot and depth.
+    function _capAt(uint160 spot, uint128 liquidity, uint256 bps, bool zeroForOne) internal pure returns (uint256) {
+        if (zeroForOne) {
+            uint160 lower = uint160((uint256(spot) * (BPS - bps)) / BPS);
+            return SqrtPriceMath.getAmount0Delta(lower, spot, liquidity, false);
+        }
+        uint160 upper = uint160((uint256(spot) * (BPS + bps)) / BPS);
+        return SqrtPriceMath.getAmount1Delta(spot, upper, liquidity, false);
+    }
+
+    /// @dev The largest exact output whose cost, as the block computes it, fits `ceiling`.
+    function _largestExactOutput(PoolKey memory key, bool isBuy, uint256 ceiling) internal view returns (uint256 lo) {
+        bool zeroForOne = _zeroForOne(key, isBuy);
+        lo = 1;
+        uint256 hi = ceiling;
+        while (lo < hi) {
+            uint256 mid = (lo + hi + 1) / 2;
+            if (_costIn(key.toId(), zeroForOne, mid) <= ceiling) lo = mid;
+            else hi = mid - 1;
+        }
+    }
+
+    /// @dev A v4 liquidity router funded and approved for `key`'s tokens.
+    function _lp(PoolKey memory key) internal returns (PoolModifyLiquidityTest lp) {
+        lp = new PoolModifyLiquidityTest(manager);
+        HookrToken(Currency.unwrap(key.currency0)).approve(address(lp), type(uint256).max);
+        HookrToken(Currency.unwrap(key.currency1)).approve(address(lp), type(uint256).max);
+    }
+
+    /// @dev Launches a single-sided pool, buys into it, then makes one in-cap sell of three times what the buy got,
+    ///      which leaves the range and runs to the router's price limit at zero depth. Checks the block's advice
+    ///      there, then that an in-cap exact-input buy brings the price back into the range and trading resumes.
+    function _runOutAndRecover(bool subjectIs0) internal {
+        HookrToken subject = _subjectOn(subjectIs0);
+        (PoolKey memory key,) = _launchSingleSided(subject, _terms(50, QUOTE_IN, SUBJECT_IN));
+        (, uint256 got) = _route(key, true, true, 1e18);
+        assertFalse(_advise(_ctx(key, false, true, got * 3)).reject, "the sell is within the cap");
+        _route(key, false, true, got * 3);
+        (uint160 spot, int24 tick,,) = manager.getSlot0(key.toId());
+        uint160 limit = _zeroForOne(key, false) ? MIN_PRICE : MAX_PRICE;
+        assertEq(spot, limit, "ran to the router's price limit");
+        assertEq(tick, subjectIs0 ? TickMath.MIN_TICK : int24(887_271), "tick");
+        assertTrue(
+            tick < TickMath.minUsableTick(key.tickSpacing) || tick > TickMath.maxUsableTick(key.tickSpacing),
+            "no position can cover the price"
+        );
+        assertEq(manager.getLiquidity(key.toId()), 0, "zero depth");
+        bool buyDown = _zeroForOne(key, true);
+        assertEq(cap.maxExactInput(address(root), key.toId(), buyDown, true), QUOTE_IN, "buy: the ceiling alone");
+        (bool ok, MidasSizeCapAdvisory.Reason reason,,) = _explain(_ctx(key, true, true, QUOTE_IN + 1));
+        assertEq(uint8(reason), uint8(MidasSizeCapAdvisory.Reason.OVER_CEILING), "over the ceiling");
+        (ok, reason,,) = _explain(_ctx(key, true, false, 1e15));
+        assertEq(uint8(reason), uint8(MidasSizeCapAdvisory.Reason.NO_LIQUIDITY), "exact output at zero depth");
+        (ok,,,) = _explain(_ctx(key, true, true, 1e15));
+        assertTrue(ok, "an exact-input buy is admitted");
+        (, uint256 bought) = _route(key, true, true, 1e15);
+        assertGt(bought, 0, "the buy filled");
+        (, tick,,) = manager.getSlot0(key.toId());
+        assertTrue(subjectIs0 ? tick >= 0 : tick < 0, "back in the range");
+        assertGt(manager.getLiquidity(key.toId()), 0, "depth again");
+        (, bought) = _route(key, true, true, 1e18);
+        assertGt(bought, 0, "trading resumes");
+        console2.log(
+            subjectIs0 ? "run out to MIN_TICK, back to tick" : "run out to tick 887271, back to tick", int256(tick)
+        );
     }
 }
