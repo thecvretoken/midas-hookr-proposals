@@ -19,13 +19,13 @@ these extend are listed at the bottom.
 | `FloorBidHook` | Park fees as a standing bid the pool owns instead of burning them | `0x2088` | 26 | 13,147 B |
 | Fee-Stream Collateral | Borrow against realised fees instead of selling supply | spec + interfaces | n/a | n/a |
 | `SweepGuard` (library) | Cooldown, sqrt-space reference band, size cap, output floor and bounded recovery for a conversion through a pool the caller does not control | n/a | 51 | n/a |
-| `MidasSizeCapAdvisory` | SweepGuard's size cap as a Hookr Hook Block: refuse a swap over the pool's impact cap or its per-direction ceiling | IHookrAdvisory, BEFORE_SWAP | 28 + kit | 6,967 B |
+| `MidasSizeCapAdvisory` | SweepGuard's size cap as a Hookr Hook Block: refuse a swap over the pool's impact cap or its per-direction ceiling, with an always-admitted floor per direction | IHookrAdvisory, BEFORE_SWAP | 39 + kit | 7,558 B |
 
 182 tests, all passing. solc 0.8.26, via_ir, optimizer 200 runs, cancun.
 
 `sweep-route-0922/` holds the 22 Sep route-allowlist patch and its tests, pinned: 29 passing.
 
-`hookr-size-cap/` holds `MidasSizeCapAdvisory` with its own build and pin, against Hookr's contracts at `5ba9dfc9`. It builds with hookr-1's settings (solc 0.8.37, via_ir, optimizer 200 runs, prague). Its 28 tests pass (25 refuse-path tests on Hookr's real fixture, 3 on raw PoolManager states), and Hookr's conformance kit runs 7 passing, 1 expected failure (the fuzz that asserts advice never refuses) and 8 pair checks skipped. These are not in the 182.
+`hookr-size-cap/` holds `MidasSizeCapAdvisory` with its own build and pin, against Hookr's contracts at `5ba9dfc9`. It builds with hookr-1's settings (solc 0.8.37, via_ir, optimizer 200 runs, prague). Its 39 tests pass (32 refuse-path and floor tests on Hookr's real fixture, 7 on raw PoolManager states, the pre-floor block run beside it), and Hookr's conformance kit runs 7 passing, 1 expected failure (the fuzz that asserts advice never refuses) and 8 pair checks skipped. These are not in the 182.
 
 ## Reviewer briefs
 
@@ -43,7 +43,7 @@ They are extracted from the deployed `MidasRWAHook` and are reusable independent
 with measured results, the size cap and recovery path added on 2 Oct, and the 22 Sep 14% case
 step by step.
 
-`docs/SIZE-CAP-ADVISORY.md` is the reviewer brief for the Hook Blocks Market submission: the mechanism, the cap, gas limit and phases it declares, fail-closed and fail-open behavior read from `HookrRoot._advice`, the parameters and their ceilings, the conformance kit's result with the one expected failure and why, and the refuse-path tests.
+`docs/SIZE-CAP-ADVISORY.md` is the reviewer brief for the Hook Blocks Market submission: the mechanism, the cap, gas limit and phases it declares, fail-closed and fail-open behavior read from `HookrRoot._advice`, the parameters and their ceilings, the always-admitted floor with its abuse analysis, the conformance kit's result with the one expected failure and why, and the refuse-path tests.
 
 `docs/FEE-STREAM-COLLATERAL.md` is the design spec for the credit idea, with
 `src/interfaces/IFeeStream.sol` and `src/interfaces/IFeeStreamCredit.sol` encoding it. There is

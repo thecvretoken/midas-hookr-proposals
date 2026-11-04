@@ -57,8 +57,9 @@ contract MidasSizeCapConformanceTest is AdvisoryConformance {
         return address(new MidasSizeCapAdvisory(manager));
     }
 
+    /// @dev Floors of 0: the kit runs the cap as it was before the floor, so its results compare with earlier runs.
     function _kitRootData() internal pure override returns (bytes memory) {
-        return abi.encode(KIT_IMPACT_BPS, KIT_MAX_IN, KIT_MAX_IN);
+        return abi.encode(KIT_IMPACT_BPS, KIT_MAX_IN, KIT_MAX_IN, uint256(0), uint256(0));
     }
 
     /// @dev Unused: the block serves no pair roots.
