@@ -2,7 +2,7 @@
 
 SweepGuard's size cap as a Hook Block for the Hook Blocks Market. It is an `IHookrAdvisory` block, the interface Hookr named for a size cap, and it refuses a swap larger than its pool's cap, except that a swap at or under the pool's always-admitted floor is never refused for impact. It never charges a surcharge and never takes quote. Whether it should also implement `IHookrMarketModule` and call `recordInstall` from `bind`, to be listed in the bonded `HookrModuleMarket` at `0xbAcE47373D6FF5B017e08a3EcA5a93ec49680f15`, is an open question for Hookr; this version does neither.
 
-Author: Midas. Status: unaudited, nothing deployed. Source `hookr-size-cap/src/MidasSizeCapAdvisory.sol`. Tests `hookr-size-cap/test/MidasSizeCapAdvisory.t.sol` (32, the refuse path and the floor on the real fixture), `hookr-size-cap/test/MidasSizeCapMath.t.sol` (7, the arithmetic on arbitrary PoolManager states, with the pre-floor block run beside it) and `hookr-size-cap/test/MidasSizeCapConformance.t.sol` (Hookr's conformance kit, unmodified, driven against the block). Built against github.com/Hookr-fun/hookr-contracts at `5ba9dfc9cc3d1b463315518f17dda8bb07f48d3b`, the interfaces in `hookr-1/src/interfaces` as they stand there, with `lib/forge-std` at `c179529c` and `lib/v4-core` at `46c68346` as its `foundry.lock` records. `hookr-size-cap/pin.sh` checks out exactly those. Every figure below comes from the `-vv` logs of those files.
+Author: Midas. Status: unaudited, nothing deployed. Source `hookr-size-cap/src/MidasSizeCapAdvisory.sol`. Tests `hookr-size-cap/test/MidasSizeCapAdvisory.t.sol` (32, the refuse path and the floor on the real fixture), `hookr-size-cap/test/MidasSizeCapMath.t.sol` (7, the arithmetic on arbitrary PoolManager states, with the pre-floor block run beside it), `hookr-size-cap/test/MidasSizeCapConformance.t.sol` (Hookr's conformance kit, unmodified, driven against the block), and `hookr-size-cap/test/MidasSizeCapLane.t.sol` (13, the block on lane pools with arb recapture on, under the `lane` profile). Built against github.com/Hookr-fun/hookr-contracts at `5ba9dfc9cc3d1b463315518f17dda8bb07f48d3b`, the interfaces in `hookr-1/src/interfaces` as they stand there, with `lib/forge-std` at `c179529c` and `lib/v4-core` at `46c68346` as its `foundry.lock` records. `hookr-size-cap/pin.sh` checks out exactly those. Every figure below comes from the `-vv` logs of those files.
 
 ## What it is
 
@@ -206,6 +206,81 @@ The one failure is the one Hookr flagged in advance. The fuzz asserts that advic
 
 Measured boundaries on the 1e24 pools: the 10 bps impact cap admits an exact-input buy of 999,999,999,999,999,999,999 and a sell of 1,001,001,001,001,001,001,001 (token1 in and token0 in respectively). Under the 1e21 and 2e21 ceilings the largest exact outputs the block admits are a buy of 996,006,981,039,903,216,493 and a sell of 1,990,031,876,438,381,866,558, the difference being the 0.30% base fee and the output's own impact.
 
+## On a lane pool with arb recapture
+
+New Hookr pools launch with arb recapture on, so the executor's legs go through the advisory too: `HookrLane._enter` returns bit 24 for a leg on an advised pool, and the root asks the advisory about it as an unauthenticated swap of the executor, refusal included. Two questions from Hookr (5 Nov): on a real lane pool, does a refused leg fail only that recapture while the trader's swap goes through, and how often does a normal-size gap get refused?
+
+`hookr-size-cap/test/MidasSizeCapLane.t.sol` answers both with Hookr's own lane fixtures, unmodified. It runs under a `lane` profile with the settings hookr-1's own lane suites use (every top-level call isolated, `gas_limit` 4e9): `forge build test/fixtures/PoolManagerArtifact.sol`, then `FOUNDRY_PROFILE=lane forge test`. The default profile leaves it out, as hookr-1's does.
+
+- `MidasSizeCapLaneTest` uses `PartnerShapedFixture` and its `CyclingExecutor`, set up the way `hookr-1/test/lane/AdvisoryBypass.t.sol` sets up its refusing advisory. One subject, two lane members: A on ETH bound to the size cap, B on tokenB with no advisory. A hookless 0.3% venue sits on each member's pair at L = 1e24, and an ETH/tokenB connector joins them. The executor routes each member against its venue (65 bps threshold) and through the other member (95 bps). The `CyclingExecutor` runs each chunk in its own self-call: a refused leg unwinds that chunk alone, and the route's chunk halves and stays halved for the rest of the call. A route stops once its chunk is under its first chunk / 64 (1e22 / 64, about 1.56e20); since a chunk is also sized from the gap, that can come after a single halving.
+- `MidasSizeCapOneShotLaneTest` uses `LaneRootFixture` with Hookr's `TwoVenueExecutor` mock (`maxQuoteIn` 1e22). It closes a gap in one pair of legs and reverts if either leg reverts. Its buy leg is an exact input of `maxQuoteIn`, stopped by a price limit at the meeting price. Its sell leg is the amount the first leg bought.
+
+Every `MidasSizeCapLaneTest` scenario runs twice from the same state and addresses. The first run uses the cap's terms under test. The second uses permissive terms that refuse nothing the scenario does: impact at `MAX_IMPACT_BPS`, ceilings at `MAX_IN`. The executor's legs on A that reached the cap are counted from the state diff, excluding the trader's own authenticated swap, along with the ones whose chunk was unwound. For each of those legs the test also recomputes the cap's own verdict from the pool state the cap read inside that call (slot0, liquidity and, at a price on a tick boundary, the crossed tick's liquidityNet) and the pool's terms, and every scenario asserts that the legs the cap refused are exactly the legs that unwound. The lane refuses some legs itself: a cycle's leg on A against the direction the frame already set reverts with `LegDirection` in `HookrLane._enter`, before the cap is asked, and is not counted. The logs also give the venue and cycle chunks each run kept.
+
+### A refused leg fails only its recapture
+
+| Executor | What happens | Test |
+|---|---|---|
+| Partner-shaped (`CyclingExecutor`) | A whale buys 1% of A's depth, admitted, leaving A about 2% over its venue. The sell ceiling is 1 subject, so every closing leg is refused: 9 asked, 9 refused, nothing pushed, no `CorrectionFailed`. The trader gets exactly the output it gets with the lane stopped, and A ends at exactly the same price. With a sell ceiling that admits the legs, the same buy pushes 17,959,553,450,197,383,457 wei | `test_lane_refusedLegsUnwindAndTheTradeSettles` |
+| One-shot (`TwoVenueExecutor`) | The subject is 4% cheaper on the venue. At 50 bps the sell leg into the pool is over the cap, and the root records `CorrectionFailed` with the PoolManager's `WrappedError` in both the before and after phases. Nothing is pushed. The trade pays exactly what it pays with the lane stopped, on a pool the executor never moved. A 2,000 bps cap recaptures the same gap | `test_oneShot_refusedLegFailsTheCorrectionAndTheTradeSettles` |
+
+### Gaps a trade under the cap made
+
+With the impact cap alone deciding (ceilings at `MAX_IN`, floors of 0), these gaps were never refused. A sell ceiling below the trade does refuse them, as the first table shows. `test_lane_tradeGapsAreRecapturedAsIfUncapped` buys 0.2%, 0.45% and 0.9% of A's depth, at A depths of 1e24 and 1e23 (the venue stays at 1e24), under caps of 25, 50 and 100 bps. The cap admits a buy exactly when it is within `maxExactInput`. The six admitted buys that left a gap to close (0.45% at 50 and 100 bps, 0.9% at 100 bps, at each depth; asserted) were recaptured identically to the uncapped run in 1 to 7 legs: no leg refused, the same push, the same gap left and the same output. The closing legs run the other way and close only the part of the gap above the route's fees, so they are smaller than the trade the cap already admitted: at 1e24 one leg of 572,946,544,069,948,300,388 closes a 0.45% buy's gap to the route's 65 bps threshold, against the trade's 4.5e21. A 0.2% buy leaves 39 bps, under the threshold, so neither run recaptures anything, and at 25 bps nothing larger is admitted.
+
+### Gaps from a price move elsewhere
+
+A's venue moves, and a 1e15 buy on A runs the before-phase recapture. A move marked + means the subject got dearer on the venue, so the executor buys it on A. A move marked − means it got cheaper there, so the executor sells into A. Each cell reads: legs refused of legs asked with the cap (legs asked without it), then the push as a share of the uncapped run's push.
+
+Cap 50 bps, floors of 0 unless noted (`test_lane_venueGaps_*`):
+
+| Venue move | A 1e24 | A 2.5e23 | A 1e23 | A 2.5e22 | A 2.5e22, floor 5e20 |
+|---|---|---|---|---|---|
+| +2% | 0 of 1 (1), 100% | 0 of 10 (10), 100% | 0 of 17 (17), 100% | 0 of 18 (18), 100% | 0 of 18 (18), 100% |
+| −2% | 0 of 1 (1), 100% | 0 of 11 (11), 100% | 0 of 16 (16), 100% | 0 of 18 (18), 100% | 0 of 18 (18), 100% |
+| +4% | 1 of 4 (2), 99.78% | 1 of 18 (16), 99.99% | 1 of 23 (21), 99.99% | 2 of 2 (24), 0% | 0 of 24 (24), 100% |
+| −4% | 1 of 4 (2), 99.77% | 1 of 18 (16), 100% | 1 of 24 (22), 100% | 2 of 2 (24), 0% | 0 of 24 (24), 100% |
+| +8% | 1 of 6 (3), 99.85% | 3 of 25 (18), 99.98% | 3 of 31 (23), 99.97% | 4 of 4 (27), 0% | 0 of 27 (27), 100% |
+| −8% | 2 of 10 (3), 99.84% | 3 of 24 (17), 99.99% | 3 of 31 (22), 99.98% | 4 of 4 (27), 0% | 0 of 27 (27), 100% |
+| +16% | 3 of 17 (6), 99.95% | 6 of 39 (19), 100% | 6 of 41 (24), 99.36% | 6 of 6 (29), 0% | 2 of 31 (29), 99.99% |
+| −16% | 4 of 23 (6), 99.98% | 4 of 29 (19), 67.88% | 4 of 33 (24), 59.16% | 6 of 6 (29), 0% | 3 of 35 (29), 99.98% |
+
+A at 1e24, floors of 0, by cap (`test_lane_venueGaps_capLevels` and `_deep`):
+
+| Venue move | 25 bps | 50 bps | 100 bps |
+|---|---|---|---|
+| +2% | 1 of 3 (1), 99.94% | 0 of 1 (1), 100% | 0 of 1 (1), 100% |
+| −2% | 1 of 3 (1), 99.94% | 0 of 1 (1), 100% | 0 of 1 (1), 100% |
+| +4% | 2 of 7 (2), 99.71% | 1 of 4 (2), 99.78% | 0 of 2 (2), 100% |
+| −4% | 2 of 7 (2), 99.70% | 1 of 4 (2), 99.77% | 0 of 2 (2), 100% |
+| +8% | 3 of 13 (3), 99.80% | 1 of 6 (3), 99.85% | 0 of 3 (3), 100% |
+| −8% | 4 of 20 (3), 99.81% | 2 of 10 (3), 99.84% | 1 of 6 (3), 99.84% |
+| +16% | 5 of 30 (6), 99.95% | 3 of 17 (6), 99.95% | 1 of 8 (6), 100% |
+| −16% | 5 of 31 (6), 88.24% | 4 of 23 (6), 99.98% | 2 of 12 (6), 99.99% |
+
+What the tables show:
+
+- At 50 bps a 2% gap is never refused, at any depth tested. On pools at 1e23 and deeper, a gap of 4% or more has its oversized chunks refused; the executor halves them and keeps going, and through 8% it ends within 0.25% of the uncapped push. The cost is extra legs: 4 instead of 2 at 4% on the deep pool, and 10 instead of 3 at −8%. At 2.5e22 with floors of 0 it stops instead (below).
+- When the venue moves 16% in the − direction on the 2.5e23 and 1e23 pools, the capped run pushed 68% and 59% of the uncapped run, although it closed more of A's gap (65 bps left against 787 and 1,117). The cap refused no cycle leg in these runs; the shortfall comes through gas and route order. The logs show the chunks: at 1e23 the capped run kept 29 venue chunks and no cycles, the uncapped run 9 venue chunks and 15 cycles through B (at 2.5e23, 25 and none against 8 and 11). A -vvvv trace of the 1e23 run shows why. After its refusals the venue route kept halved chunks for the rest of the before-phase, took 23 chunks where the uncapped run took 9, and used about 2.6M of the before-phase's 3M gas grant without closing A's gap. In the after-phase the venue route still had a gap and ran first, which set A's direction for that frame to a sell, and the lane refused each cycle chunk's buy leg on A (`LegDirection`, before the cap is asked) until the cycle route dropped. The uncapped run closed the venue gap in the before-phase, so its after-phase ran only the cycle route, which paid more here. The 88% at −16% under 25 bps at 1e24 shows the same pattern in its chunk counts (26 venue, no cycles, against 4 and 2).
+- On a pool shallower than the depth the floor is sized for, floors of 0 stop the recapture from a 4% gap. At A = 2.5e22 the 50 bps impact cap is about 1.25e20, under the `CyclingExecutor`'s smallest chunk of about 1.56e20. From a 4% gap the venue route's first chunk is refused, its half is below the executor's minimum, and the route stops, in the before-phase and again in the after-phase. The cycle route never opens, since nothing moves A away from B, so nothing is recaptured (`test_lane_venueGaps_shallow_noFloor`). With a floor of 5e20, the 50 bps impact cap at 1e23 (a tenth of the deepest pool, taken here as the thinnest depth still counted as real, the rule "Parameters and ceilings" gives for a floor), the same gaps are recaptured within 0.1% (`_shallow_typicalFloor`).
+- At 1e24, 2.5e23 and 1e23 the floor changes nothing; the results are identical with floors of 0 and 5e20. At those depths the impact cap is at or above the floor.
+- Every capped run in both tables above settled the trade, and no correction failed.
+
+### The one-shot executor
+
+`test_oneShot_grid`, caps of 50, 100 and 2,000 bps on pools at 1e24:
+
+| Venue move | Pool leg | 50 bps | 100 bps | 2,000 bps |
+|---|---|---|---|---|
+| ±1.5% | sell (−) / buy (+) | recaptured / refused | recaptured / recaptured | recaptured / recaptured |
+| ±2% | sell / buy | recaptured / refused | recaptured / recaptured | recaptured / recaptured |
+| ±4% | sell / buy | refused / refused | recaptured / recaptured | recaptured / recaptured |
+| ±8% | sell / buy | refused / refused | refused / recaptured | recaptured / recaptured |
+
+A refusal here fails the whole correction (`CorrectionFailed`, `WrappedError`), and the trade always settles. The sell leg specifies the amount it sells, so it is refused only when that amount is over the cap. The buy leg specifies 1e22 and relies on its price limit, and the cap judges the specified amount and ignores the limit (`sqrtPriceLimitX96` is not read). At 50 bps the cap admits up to 5,025,125,628,140,703,517,587 on that pool, so every buy leg is refused, even at the 1.5% gap, where the before-phase buy leg fills 456,178,441,570,891,350,708 under a wide cap, about a tenth of what the cap admits (`test_oneShot_buyLegIsJudgedOnItsAmountNotItsLimit`).
+
+That last point depends on how the production executor sizes its legs. An executor that sends each leg's real amount sees what the partner-shaped rows show. An executor that sends a large exact input bounded by a price limit would have its legs on a capped pool refused whenever that input is over the cap. If that is how Hookr's partner executor works, the block could cost an exact input's impact at the smaller of its amount and the move to its `sqrtPriceLimitX96`. The limit bounds the move exactly whatever the liquidity, and the ceilings would stay on the specified amount. That change is not built.
+
 ## Gas
 
 From `test_gas_everyPathUnderTheDeclaredLimit`. Each call is measured from a snapshot taken before anything in the test's transaction touched the block, the PoolManager or the registry, so their accounts and every slot read are cold and the root's cold access to the block is inside the figure. The root is warm for `bind`, as it is when it calls `bind`. In a real swap the PoolManager is already warm, so the `beforeSwap` figures are an upper bound.
@@ -250,7 +325,7 @@ In a fail-closed slot a refused swap reverts and moves nothing.
 - Ceilings and floors are raw units per direction, fixed at bind. A token with odd decimals needs them set for it.
 - The block reads one PoolManager, fixed at deploy, and refuses to bind for a root on another.
 - `sqrtPriceLimitX96` is not read; the cap is the same whatever limit the swap carries.
-- An arb recapture executor's leg on a pool with an advisory is asked like any other swap (`HookrRoot.beforeSwap`), so the cap applies to legs too.
+- An arb recapture executor's leg on a pool with an advisory is asked as an unauthenticated swap of the executor (`HookrLane._enter`, bit 24), so the cap applies to legs too. A refused leg fails only that recapture; the trade settles. An executor that bounds a large exact input by a price limit is judged on the input. On a pool shallower than the floor is sized for, floors of 0 can leave the impact cap under an executor's smallest chunk, and that executor stops recapturing. See "On a lane pool with arb recapture".
 
 ## What testing turned up
 
@@ -274,6 +349,8 @@ bash pin.sh            # hookr-contracts @ 5ba9dfc9, lib/forge-std @ c179529c, l
 forge test             # 55: 46 pass, 1 fails (testFuzz_kit_root_surchargeWithinCap, the expected one), 8 skipped
 forge test --no-match-test testFuzz_kit_root_surchargeWithinCap   # 46 pass, 8 skipped
 forge test --match-contract MidasSizeCapAdvisoryTest -vv           # the 32 refuse-path and floor tests with their figures
+forge build test/fixtures/PoolManagerArtifact.sol                   # the lane profile compiles only its own file, so build the PoolManager first, as hookr-1/test/README.md does
+FOUNDRY_PROFILE=lane forge test -vv    # the 13 lane tests: 13 pass, with the tables above in the logs
 ```
 
 Unaudited, nothing deployed.

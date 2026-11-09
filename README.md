@@ -19,13 +19,13 @@ these extend are listed at the bottom.
 | `FloorBidHook` | Park fees as a standing bid the pool owns instead of burning them | `0x2088` | 26 | 13,147 B |
 | Fee-Stream Collateral | Borrow against realised fees instead of selling supply | spec + interfaces | n/a | n/a |
 | `SweepGuard` (library) | Cooldown, sqrt-space reference band, size cap, output floor and bounded recovery for a conversion through a pool the caller does not control | n/a | 51 | n/a |
-| `MidasSizeCapAdvisory` | SweepGuard's size cap as a Hookr Hook Block: refuse a swap over the pool's impact cap or its per-direction ceiling, with an always-admitted floor per direction | IHookrAdvisory, BEFORE_SWAP | 39 + kit | 7,558 B |
+| `MidasSizeCapAdvisory` | SweepGuard's size cap as a Hookr Hook Block: refuse a swap over the pool's impact cap or its per-direction ceiling, with an always-admitted floor per direction | IHookrAdvisory, BEFORE_SWAP | 39 + 13 lane + kit | 7,558 B |
 
 182 tests, all passing. solc 0.8.26, via_ir, optimizer 200 runs, cancun.
 
 `sweep-route-0922/` holds the 22 Sep route-allowlist patch and its tests, pinned: 29 passing.
 
-`hookr-size-cap/` holds `MidasSizeCapAdvisory` with its own build and pin, against Hookr's contracts at `5ba9dfc9`. It builds with hookr-1's settings (solc 0.8.37, via_ir, optimizer 200 runs, prague). Its 39 tests pass (32 refuse-path and floor tests on Hookr's real fixture, 7 on raw PoolManager states, the pre-floor block run beside it), and Hookr's conformance kit runs 7 passing, 1 expected failure (the fuzz that asserts advice never refuses) and 8 pair checks skipped. These are not in the 182.
+`hookr-size-cap/` holds `MidasSizeCapAdvisory` with its own build and pin, against Hookr's contracts at `5ba9dfc9`. It builds with hookr-1's settings (solc 0.8.37, via_ir, optimizer 200 runs, prague). Its 39 tests pass (32 refuse-path and floor tests on Hookr's real fixture, 7 on raw PoolManager states, the pre-floor block run beside it), 13 more pass on lane pools with arb recapture on under `FOUNDRY_PROFILE=lane` (Hookr's partner-shaped and two-venue executors, unmodified), and Hookr's conformance kit runs 7 passing, 1 expected failure (the fuzz that asserts advice never refuses) and 8 pair checks skipped. These are not in the 182.
 
 ## Reviewer briefs
 
@@ -81,7 +81,7 @@ own pin, v4-core a22414e4, because the deployed source predates the move of `Swa
 `bash compat.sh` compiles every SweepGuard function against both v4-core main and the v4.0.0
 release, with solc 0.8.24, 0.8.26 and 0.8.37, legacy and via-IR.
 
-`hookr-size-cap/` builds on its own: `cd hookr-size-cap && bash pin.sh && forge test`. `pin.sh`
+`hookr-size-cap/` builds on its own: `cd hookr-size-cap && bash pin.sh && forge test`, and for the lane suite `forge build test/fixtures/PoolManagerArtifact.sol && FOUNDRY_PROFILE=lane forge test`. `pin.sh`
 checks out Hookr-fun/hookr-contracts at 5ba9dfc9cc3d1b463315518f17dda8bb07f48d3b with its
 `lib/forge-std` and `lib/v4-core` at the commits its `foundry.lock` records.
 

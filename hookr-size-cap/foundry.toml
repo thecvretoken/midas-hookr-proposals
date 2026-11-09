@@ -33,9 +33,22 @@ ffi = false
 unchecked_cheatcode_artifacts = true
 # The kit reads the block's selectors and runtime from its own build artifact.
 fs_permissions = [{ access = "read", path = "./out" }]
+# The lane suite runs only under the lane profile below, as Hookr's own lane suites do (hookr-1/foundry.toml).
+no_match_path = "test/MidasSizeCapLane.t.sol"
 
 [profile.default.fuzz]
 runs = 256
+
+# The size cap on a lane pool with arb recapture on (test/MidasSizeCapLane.t.sol), under the settings hookr-1's own
+# lane profile runs its lane suites with: every top-level call isolated as its own transaction, and gas_limit 4e9 as
+# hookr-1's lane profile sets it. These tests also decode a state diff per run, and at forge's default limit of 2^30
+# the venue tests run out of gas on memory. The profile compiles only its own file, so build the PoolManager fixture first,
+# as hookr-1/test/README.md does: `forge build test/fixtures/PoolManagerArtifact.sol`, then `FOUNDRY_PROFILE=lane forge test`.
+[profile.lane]
+isolate = true
+match_path = "test/MidasSizeCapLane.t.sol"
+no_match_path = "test/*.none"
+gas_limit = 4000000000
 
 [lint]
 lint_on_build = false
