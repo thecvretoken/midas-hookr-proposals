@@ -5,8 +5,10 @@ suites, one written as a design spec because the market it needs does not exist 
 SweepGuard, the sweep rails from MidasRWAHook as a standalone library, and
 MidasSizeCapAdvisory, SweepGuard's size cap as a Hook Block for Hookr's Hook Blocks Market.
 
-Prepared by Midas. Everything here is UNAUDITED and NOT DEPLOYED. The two deployed base hooks
-these extend are listed at the bottom.
+Prepared by Midas. Everything here is UNAUDITED. `MidasSizeCapAdvisory` is deployed on Robinhood
+Chain at `0x475B00998F97C9338e2CE519F4f0e617E065997D`, verified on Sourcify, and not yet admitted
+by Hookr; everything else here is NOT DEPLOYED. The two deployed base hooks these extend are
+listed at the bottom.
 
 ## What is in here
 
@@ -25,7 +27,7 @@ these extend are listed at the bottom.
 
 `sweep-route-0922/` holds the 22 Sep route-allowlist patch and its tests, pinned: 29 passing.
 
-`hookr-size-cap/` holds `MidasSizeCapAdvisory` with its own build and pin, against Hookr's contracts at `5ba9dfc9`. It builds with hookr-1's settings (solc 0.8.37, via_ir, optimizer 200 runs, prague). Its 39 tests pass (32 refuse-path and floor tests on Hookr's real fixture, 7 on raw PoolManager states, the pre-floor block run beside it), 13 more pass on lane pools with arb recapture on under `FOUNDRY_PROFILE=lane` (Hookr's partner-shaped and two-venue executors, unmodified), and Hookr's conformance kit runs 7 passing, 1 expected failure (the fuzz that asserts advice never refuses) and 8 pair checks skipped. These are not in the 182.
+`hookr-size-cap/` holds `MidasSizeCapAdvisory` with its own build and pin, against Hookr's contracts at `5ba9dfc9`. It builds with hookr-1's settings (solc 0.8.37, via_ir, optimizer 200 runs, prague). Its 39 tests pass (32 refuse-path and floor tests on Hookr's real fixture, 7 on raw PoolManager states, the pre-floor block run beside it), 13 more pass on lane pools with arb recapture on under `FOUNDRY_PROFILE=lane` (Hookr's partner-shaped and two-venue executors, unmodified), and Hookr's conformance kit runs 7 passing, 1 expected failure (the fuzz that asserts advice never refuses) and 8 pair checks skipped. These are not in the 182. It is deployed from commit `ef61253` at `0x475B00998F97C9338e2CE519F4f0e617E065997D` on Robinhood Chain (creation tx `0xd337f41033f2237b0a4bbc978af5ba1fd3aaca8c844d178d27e7a63ba02984d2`), and `docs/SIZE-CAP-ADVISORY.md` under "Deployment" shows how to check the bytes.
 
 ## Reviewer briefs
 

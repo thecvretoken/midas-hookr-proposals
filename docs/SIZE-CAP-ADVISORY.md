@@ -2,7 +2,7 @@
 
 SweepGuard's size cap as a Hook Block for the Hook Blocks Market. It is an `IHookrAdvisory` block, the interface Hookr named for a size cap, and it refuses a swap larger than its pool's cap, except that a swap at or under the pool's always-admitted floor is never refused for impact. It never charges a surcharge and never takes quote. Whether it should also implement `IHookrMarketModule` and call `recordInstall` from `bind`, to be listed in the bonded `HookrModuleMarket` at `0xbAcE47373D6FF5B017e08a3EcA5a93ec49680f15`, is an open question for Hookr; this version does neither.
 
-Author: Midas. Status: unaudited, nothing deployed. Source `hookr-size-cap/src/MidasSizeCapAdvisory.sol`. Tests `hookr-size-cap/test/MidasSizeCapAdvisory.t.sol` (32, the refuse path and the floor on the real fixture), `hookr-size-cap/test/MidasSizeCapMath.t.sol` (7, the arithmetic on arbitrary PoolManager states, with the pre-floor block run beside it), `hookr-size-cap/test/MidasSizeCapConformance.t.sol` (Hookr's conformance kit, unmodified, driven against the block), and `hookr-size-cap/test/MidasSizeCapLane.t.sol` (13, the block on lane pools with arb recapture on, under the `lane` profile). Built against github.com/Hookr-fun/hookr-contracts at `5ba9dfc9cc3d1b463315518f17dda8bb07f48d3b`, the interfaces in `hookr-1/src/interfaces` as they stand there, with `lib/forge-std` at `c179529c` and `lib/v4-core` at `46c68346` as its `foundry.lock` records. `hookr-size-cap/pin.sh` checks out exactly those. Every figure below comes from the `-vv` logs of those files.
+Author: Midas. Status: unaudited. Deployed on Robinhood Chain at `0x475B00998F97C9338e2CE519F4f0e617E065997D` from commit `ef61253` and verified on Sourcify as an exact match; Hookr has not admitted it yet (see "Deployment"). Source `hookr-size-cap/src/MidasSizeCapAdvisory.sol`. Tests `hookr-size-cap/test/MidasSizeCapAdvisory.t.sol` (32, the refuse path and the floor on the real fixture), `hookr-size-cap/test/MidasSizeCapMath.t.sol` (7, the arithmetic on arbitrary PoolManager states, with the pre-floor block run beside it), `hookr-size-cap/test/MidasSizeCapConformance.t.sol` (Hookr's conformance kit, unmodified, driven against the block), and `hookr-size-cap/test/MidasSizeCapLane.t.sol` (13, the block on lane pools with arb recapture on, under the `lane` profile). Built against github.com/Hookr-fun/hookr-contracts at `5ba9dfc9cc3d1b463315518f17dda8bb07f48d3b`, the interfaces in `hookr-1/src/interfaces` as they stand there, with `lib/forge-std` at `c179529c` and `lib/v4-core` at `46c68346` as its `foundry.lock` records. `hookr-size-cap/pin.sh` checks out exactly those. Every figure below comes from the `-vv` logs of those files.
 
 ## What it is
 
@@ -58,6 +58,33 @@ The admission Hookr would queue through the timelock, and what `bind` holds ever
 | `failOpen` | false | A block that refuses runs fail-closed. With this admission the root refuses to open a fail-open pool naming the block (`HookrLane.sol` line 944), `test_declaredAdmission_refusesAFailOpenPool` |
 
 `bind` also checks the caller is the pool's hook, the pool names this contract as its advisory, and the root's PoolManager is the block's. It does not check the pool's fail mode itself, as Market Guard, the Buy/Sell Block and the Credential Gate do when their refusing modes are on, because Hookr's conformance kit admits every advisory fail-open and launches a fail-open pool, and that check would stop the kit in setUp. The admission is where fail-closed is held. Every check has its own code in `InvalidPoolConfig(uint8)` and `InvalidTerms(uint8)`, listed in the NatSpec, in the same pattern as HookrComplianceGuard.
+
+## Deployment
+
+Deployed on Robinhood Chain (chain id 4663) on 11 Nov 2026 at Hookr's request, from commit `ef61253`, against the PoolManager that HookrRoot `0x89c9FB50d1f03192230FFB1c279BB6E7d3Fe6aCc` names. The block's source and `pin.sh` have not changed since that commit, and its creation code builds byte for byte the same at `3134952`. It is not admitted yet; Hookr queues the admission in "What it declares" through its timelock.
+
+| | |
+|---|---|
+| Address | `0x475B00998F97C9338e2CE519F4f0e617E065997D` |
+| Creation transaction | `0xd337f41033f2237b0a4bbc978af5ba1fd3aaca8c844d178d27e7a63ba02984d2`, block 112,087,662, 23:33:53 UTC, 1,691,097 gas |
+| Deployer | `0x7689f33dac018e92A33EF6F49CC51D150544f393`, the deployer of the base hooks in the README. It holds no role in the block, which has no owner |
+| Constructor argument | PoolManager `0x8366a39CC670B4001A1121B8F6A443A643e40951`, written into the runtime's three immutable references (offsets 222, 1007 and 3745) |
+| Compiler | solc `0.8.37+commit.f401782d`, via-IR, optimizer 200 runs, EVM prague, metadata hash ipfs, as `hookr-size-cap/foundry.toml` sets them |
+| Runtime | 7,558 bytes, codehash `0x6ab4af8a2d37eed2b07895211db2c2cc1f8c109afb13b9a54ed170ed97e54be1` |
+| Verification | Sourcify exact match on creation and runtime bytecode, metadata included: https://repo.sourcify.dev/4663/0x475B00998F97C9338e2CE519F4f0e617E065997D. Blockscout shows it verified from the same source |
+
+Read back from the chain after the deploy: `poolManager()` returns the PoolManager above, as HookrRoot's `poolManager()` does, so `bind` from that root passes its manager check; `configSchemaHash()` returns `0x6ba75614...47ad59`, `ADVISORY_GAS()` 100,000 and `PHASES()` 1, the values in "What it declares".
+
+To check the bytes from source, after `bash pin.sh`:
+
+```bash
+forge inspect src/MidasSizeCapAdvisory.sol:MidasSizeCapAdvisory bytecode | shasum -a 256
+# 3d1d9d46c7910ff7f35c593afdc18fc2df2f5c4025512004295d07d8c53e4b8c, the creation code as forge prints it, without the constructor argument
+cast codehash 0x475B00998F97C9338e2CE519F4f0e617E065997D --rpc-url https://rpc.mainnet.chain.robinhood.com
+# 0x6ab4af8a2d37eed2b07895211db2c2cc1f8c109afb13b9a54ed170ed97e54be1
+```
+
+The build's `deployedBytecode`, with the PoolManager written into its immutable references, hashes to that codehash.
 
 ## Fail-closed and fail-open
 
@@ -279,7 +306,15 @@ What the tables show:
 
 A refusal here fails the whole correction (`CorrectionFailed`, `WrappedError`), and the trade always settles. The sell leg specifies the amount it sells, so it is refused only when that amount is over the cap. The buy leg specifies 1e22 and relies on its price limit, and the cap judges the specified amount and ignores the limit (`sqrtPriceLimitX96` is not read). At 50 bps the cap admits up to 5,025,125,628,140,703,517,587 on that pool, so every buy leg is refused, even at the 1.5% gap, where the before-phase buy leg fills 456,178,441,570,891,350,708 under a wide cap, about a tenth of what the cap admits (`test_oneShot_buyLegIsJudgedOnItsAmountNotItsLimit`).
 
-That last point depends on how the production executor sizes its legs. An executor that sends each leg's real amount sees what the partner-shaped rows show. An executor that sends a large exact input bounded by a price limit would have its legs on a capped pool refused whenever that input is over the cap. If that is how Hookr's partner executor works, the block could cost an exact input's impact at the smaller of its amount and the move to its `sqrtPriceLimitX96`. The limit bounds the move exactly whatever the liquidity, and the ceilings would stay on the specified amount. That change is not built.
+That last point depends on how the production executor sizes its legs. An executor that sends a large exact input bounded by a price limit would have its legs on a capped pool refused whenever that input is over the cap, and the block could instead cost an exact input's impact at the smaller of its amount and the move to its `sqrtPriceLimitX96`. Hookr's production executor does not size legs that way (next section), so that change is not built and the block stays as it is.
+
+### Hookr's production executor
+
+Hookr read its production executor's legs off chain, 93 of its swaps on 11 Nov 2026. Every leg is an exact input of one fixed amount, sized from the pool state the executor reads first, with the price limit left open at the tick-math bound. The amount the cap judges is the whole leg, so costing at the move to the limit would change nothing for it.
+
+The executor does not catch a failed leg. The two legs Hookr saw revert (a v3 pool's `LOK`) each took down that whole recapture, and the trader's swap settled. On a capped pool it behaves like the one-shot rows above: a refused leg fails the whole correction and the trade settles. Hookr has not yet seen an advisory refuse one of its legs on chain.
+
+Leg sizes matter for that reason. By Hookr's own rough measure (the block's formula may score them differently), 7 of the 44 lane legs it could measure on 11 Nov moved sqrt price more than 50 bps and 4 moved it more than 100 bps. Under a 50 bps impact cap with floors of 0, a leg that size is refused unless a floor admits it, and each refusal costs this executor the whole recapture. A creator who wants recapture kept should set the impact cap, the floors and the ceilings with the executor's leg sizes at that pool's depth in view. Each costs something: a wider impact cap loosens the sandwich bound for every swap (see "Parameters and ceilings"), and a floor admits floor-sized swaps at any depth (see "The floor").
 
 ## Gas
 
@@ -325,7 +360,7 @@ In a fail-closed slot a refused swap reverts and moves nothing.
 - Ceilings and floors are raw units per direction, fixed at bind. A token with odd decimals needs them set for it.
 - The block reads one PoolManager, fixed at deploy, and refuses to bind for a root on another.
 - `sqrtPriceLimitX96` is not read; the cap is the same whatever limit the swap carries.
-- An arb recapture executor's leg on a pool with an advisory is asked as an unauthenticated swap of the executor (`HookrLane._enter`, bit 24), so the cap applies to legs too. A refused leg fails only that recapture; the trade settles. An executor that bounds a large exact input by a price limit is judged on the input. On a pool shallower than the floor is sized for, floors of 0 can leave the impact cap under an executor's smallest chunk, and that executor stops recapturing. See "On a lane pool with arb recapture".
+- An arb recapture executor's leg on a pool with an advisory is asked as an unauthenticated swap of the executor (`HookrLane._enter`, bit 24), so the cap applies to legs too. A refused leg fails only that recapture; the trade settles. Hookr's production executor sends each leg as one exact input and does not catch, so a refused leg costs it the whole recapture. An executor that bounds a large exact input by a price limit is judged on the input. On a pool shallower than the floor is sized for, floors of 0 can leave the impact cap under an executor's smallest chunk, and that executor stops recapturing. See "On a lane pool with arb recapture".
 
 ## What testing turned up
 
@@ -353,4 +388,4 @@ forge build test/fixtures/PoolManagerArtifact.sol                   # the lane p
 FOUNDRY_PROFILE=lane forge test -vv    # the 13 lane tests: 13 pass, with the tables above in the logs
 ```
 
-Unaudited, nothing deployed.
+Unaudited. Deployed on Robinhood Chain at `0x475B00998F97C9338e2CE519F4f0e617E065997D`, not yet admitted.
